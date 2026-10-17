@@ -1,0 +1,8 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\Haytham.Minecraft\Haytham.Minecraft.csproj" />
+    <ProjectReference Include="..\Haytham.Store\Haytham.Store.csproj" />
+  </ItemGroup>
+
+</Project>

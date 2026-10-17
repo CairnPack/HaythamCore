@@ -1,0 +1,13 @@
+{
+  "name": "haytham-core-notes",
+  "private": true,
+  "type": "module",
+  "description": "Agent note verification scripts; see .agents/skills/write-notes-like-deepseek. Requires Node 22.18+ (built-in TypeScript type stripping).",
+  "scripts": {
+    "verify-agent-note-tree": "node .agents/skills/write-notes-like-deepseek/scripts/verify-agent-note-tree.ts",
+    "verify-agent-note-format": "node .agents/skills/write-notes-like-deepseek/scripts/verify-agent-note-format.ts",
+    "verify-archived": "node .agents/skills/write-notes-like-deepseek/scripts/verify-archived-agent-notes.ts",
+    "verify-notes": "npm run verify-agent-note-tree && npm run verify-agent-note-format && npm run verify-archived",
+    "archive-agent-note": "node .agents/skills/write-notes-like-deepseek/scripts/archive-agent-note.ts"
+  }
+}

@@ -55,3 +55,16 @@ CodeCoverage/
 *.VisualState.xml
 TestResult.xml
 nunit-*.xml
+
+# Local agent and tool configuration
+.claude/
+.codex/
+.codei18n/
+
+# IDE state
+.vs/
+.idea/
+*.user
+
+# Node (notes tooling)
+node_modules/

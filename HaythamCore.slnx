@@ -1,0 +1,7 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Haytham.Store/Haytham.Store.csproj" />
+    <Project Path="src/Haytham.Minecraft/Haytham.Minecraft.csproj" />
+    <Project Path="src/Haytham.Launch/Haytham.Launch.csproj" />
+  </Folder>
+</Solution>
