@@ -11,9 +11,9 @@
   </PropertyGroup>
 
   <PropertyGroup>
-    <Authors>cairnpack</Authors>
+    <Authors>CairnPack</Authors>
     <Description>A reusable Minecraft launcher core.</Description>
-    <PackageId>Cairnpack.$(MSBuildProjectName)</PackageId>
+    <PackageId>CairnPack.$(MSBuildProjectName)</PackageId>
     <PackageLicenseExpression>GPL-3.0-or-later</PackageLicenseExpression>
     <RepositoryUrl>https://github.com/CairnPack/HaythamCore</RepositoryUrl>
     <RepositoryType>git</RepositoryType>

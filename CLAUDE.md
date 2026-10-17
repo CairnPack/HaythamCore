@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目
 
-**Haytham Core** 是团队 cairnpack 的可复用 Minecraft 启动器核心（C#，GPL-3.0-or-later）：CAS 仓库与 GC、版本元数据、Java、加载器安装、服务器 runtime、账号、游戏进程。它不认识 Manifest、Lockfile 或实例，启动入口只收“游戏目录＋版本＋加载器”。
+**Haytham Core** 是团队 CairnPack 的可复用 Minecraft 启动器核心（C#，GPL-3.0-or-later）：CAS 仓库与 GC、版本元数据、Java、加载器安装、服务器 runtime、账号、游戏进程。它不认识 Manifest、Lockfile 或实例，启动入口只收“游戏目录＋版本＋加载器”。
 
 另外两个产品：整合包工具链 **Gebinde**（`CairnPack/Gebinde`）与桌面启动器 **Haytham Launcher**（以子模块引用本 repo）。跨产品的设计文档、ADR 与名词表目前放在 Haytham Launcher repo。
 
