@@ -14,11 +14,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 | 项目 | 内容 | 可依赖 |
 |---|---|---|
-| `Haytham.Store` | CAS、下载、文件链接、临时目录；GC（根集合由外部提供） | 无 |
-| `Haytham.Minecraft` | 启动核心的纯领域：版本解析、规则、参数、natives、崩溃诊断；不碰磁盘与网络 | 无 |
-| `Haytham.Launch` | 启动核心的 I/O：版本元数据、Java、加载器安装、服务器 runtime、账号、游戏进程 | Minecraft、Store |
+| `Haytham.Core.Store` | CAS、下载、文件链接、临时目录；GC（根集合由外部提供） | 无 |
+| `Haytham.Core.Minecraft` | 启动核心的纯领域：版本解析、规则、参数、natives、崩溃诊断；不碰磁盘与网络 | 无 |
+| `Haytham.Core.Launch` | 启动核心的 I/O：版本元数据、Java、加载器安装、服务器 runtime、账号、游戏进程 | Minecraft、Store |
 
-- **Haytham Core 与 Gebinde 互不引用。** `Haytham.*` never 引用 `Gebinde.*`。
+- **项目一律加 `Haytham.Core.` 前缀**，NuGet 包 ID 是 `CairnPack.Haytham.Core.*`（构建时由项目名自动生成）。`Minecraft` 与 `Launch` 的切分等启动核心设计时再定，但都留在 `Haytham.Core.*` 之下。
+- **`Haytham.Core.Store` 作为独立的 NuGet 包发布**，单独定版本：Gebinde 的转接项目只依赖它，不依赖整个 Haytham Core。Gebinde CLI 以后接入服务器测试，才会再依赖提供服务器 runtime 的那个包（由启动核心的设计决定是哪个）。
+- **Haytham Core 与 Gebinde 互不引用。** `Haytham.Core.*` never 引用 `Gebinde.*`。
 - **全局只有一个 CAS，以 sha1 为键**（`objects/<前两位>/<sha1>`）。对象一律只读；下载先原子写入 `object-*.part`，验证大小、sha1 与可选的 sha512 后才移入。
 - **临时目录持有锁并记录游戏 PID**（`.haytham-lock`）；具名 Maven 路径只在临时副本中出现。
 - **不在任何游戏目录写 `launcher_profiles.json` 或创建 `versions\`。**
