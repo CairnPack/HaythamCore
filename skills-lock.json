@@ -2,10 +2,10 @@
   "version": 1,
   "skills": {
     "write-notes-like-deepseek": {
-      "source": "czm15053/write-notes-like-deepseek",
+      "source": "CairnPack/write-notes-like-deepseek",
       "sourceType": "github",
       "skillPath": "skills/write-notes-like-deepseek/SKILL.md",
-      "computedHash": "686d0d907a69f1cf5ba85b3f13d88fc4eb0628d75b5a513f28e123aac7f95509"
+      "computedHash": "d8f4c2e58bfb578e70003e8add6196e4152e3223d03feb3c2f3393cf82c51bba"
     }
   }
 }
