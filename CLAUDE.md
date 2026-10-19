@@ -33,7 +33,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - 文档与领域名词用简体中文（中国大陆用语）；代码、标识符、注释与 API 文档用英文。
 - Commit 信息为双语：`type(scope): 中文 / English`。作者 email 用 GitHub 的 noreply 地址，不用个人邮箱。
 - 新代码只用新名称：`gebinde.toml`、`gebinde.lock`、`.haytham-lock`、`GEBINDE_`／`HAYTHAM_` 环境变量；代码中不出现 `cairn`。
-- 参考 ProjBobcat、HMCL、Prism 时可参考但不复制；旧版 Cairn（Kotlin）只当行为规格，代码要重新写。
+- 参考 ProjBobcat、HMCL、Prism 时可参考但不复制；旧版 Cairn（`legacy` 分支）只当参考，不是规格：行为以 Haytham Launcher repo 的 `docs/design.md`、各模块的笔记与开发者指南 §4 为准，代码要重新写。
 - `.claude/`、`.codex/`、`.codei18n/` 与构建产物是本地内容，不要提交。
 
 ## 重要变更必须留下笔记
