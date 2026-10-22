@@ -77,6 +77,20 @@ public class FakeHttpHandlerTests
     }
 
     [Fact]
+    public async Task ToString_leaves_out_credentials()
+    {
+        using var handler = new FakeHttpHandler().Respond(HttpMethod.Post, Url + "?token=secret", HttpStatusCode.OK);
+        using var client = new HttpClient(handler);
+        client.DefaultRequestHeaders.Authorization = new("Bearer", "secret");
+
+        using var content = new StringContent("refresh_token=secret");
+        using var response = await client.PostAsync(Url + "?token=secret", content, Token);
+
+        var text = Assert.Single(handler.Requests).ToString();
+        Assert.Equal($"POST {Url}", text);
+    }
+
+    [Fact]
     public async Task A_responder_can_wait_until_the_request_is_cancelled()
     {
         using var handler = new FakeHttpHandler().Respond(HttpMethod.Get, Url, async (_, ct) =>
