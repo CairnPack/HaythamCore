@@ -1,0 +1,25 @@
+<Project>
+  <!-- This file stops MSBuild's search for Directory.Build.props, so import the repository's shared settings first. -->
+  <Import Project="$([MSBuild]::GetPathOfFileAbove('Directory.Build.props', '$(MSBuildThisFileDirectory)../'))" />
+
+  <!-- Tests and the test support project run on the JIT and are never published as packages. -->
+  <PropertyGroup>
+    <IsPackable>false</IsPackable>
+    <IsAotCompatible>false</IsAotCompatible>
+  </PropertyGroup>
+
+  <!--
+    Every *.Tests project gets xUnit and Haytham.Core.Testing; it only adds a reference to the project it tests.
+    The suffix check keeps Haytham.Core.Testing from referencing itself.
+  -->
+  <PropertyGroup Condition="$(MSBuildProjectName.EndsWith('.Tests'))">
+    <OutputType>Exe</OutputType>
+    <IsTestProject>true</IsTestProject>
+  </PropertyGroup>
+
+  <ItemGroup Condition="$(MSBuildProjectName.EndsWith('.Tests'))">
+    <PackageReference Include="xunit.v3" Version="4.0.2" />
+    <Using Include="Xunit" />
+    <ProjectReference Include="$(MSBuildThisFileDirectory)Haytham.Core.Testing/Haytham.Core.Testing.csproj" />
+  </ItemGroup>
+</Project>

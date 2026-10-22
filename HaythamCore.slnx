@@ -4,4 +4,8 @@
     <Project Path="src/Haytham.Core.Minecraft/Haytham.Core.Minecraft.csproj" />
     <Project Path="src/Haytham.Core.Launch/Haytham.Core.Launch.csproj" />
   </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Haytham.Core.Testing/Haytham.Core.Testing.csproj" />
+    <Project Path="tests/Haytham.Core.Testing.Tests/Haytham.Core.Testing.Tests.csproj" />
+  </Folder>
 </Solution>
