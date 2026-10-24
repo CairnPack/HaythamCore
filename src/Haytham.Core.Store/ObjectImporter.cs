@@ -11,19 +11,10 @@ sealed class ObjectImporter(StoreLayout layout, ObjectVerifier verifier, Verific
 
     public async Task<ImportResult> ImportAsync(Stream content, ExpectedContent? expected, CancellationToken cancellationToken)
     {
-        var expectedSha512 = ParseSha512(expected?.Sha512);
-        if (expected?.Size < 0) throw new ArgumentException("The expected size cannot be negative.", nameof(expected));
-
-        // Known key and an intact object: skip reading the content at all. The object must still meet the
-        // other expectations, so that the answer is the same as for an empty store.
-        if (expected?.Sha1 is { } known
-            && await verifier.VerifyAsync(known, VerifyMode.Fast, cancellationToken) == ObjectState.Valid)
-        {
-            var existing = new FileInfo(layout.ObjectPath(known));
-            if (await FindMismatchAsync(existing, expected, expectedSha512, cancellationToken) is { } detail)
-                throw Mismatch(detail);
-            return new ImportResult(known, existing.Length, ImportOutcome.AlreadyPresent);
-        }
+        var expectedSha512 = Validate(expected, nameof(expected));
+        if (expected is not null
+            && await FindExistingAsync(expected, expectedSha512, cancellationToken) is { } existing)
+            return existing;
 
         Directory.CreateDirectory(layout.TempDirectory);
         var part = layout.NewPartPath();
@@ -60,17 +51,45 @@ sealed class ObjectImporter(StoreLayout layout, ObjectVerifier verifier, Verific
     }
 
     /// <summary>
-    /// Whether the store holds an intact object under <paramref name="sha1"/> that also has the expected size
-    /// and SHA-512. A SHA-1 in <paramref name="expected"/> that differs from <paramref name="sha1"/> does not
-    /// satisfy it. Downloads use this to decide that nothing needs fetching.
+    /// Checks the expectations themselves, before anything is read or downloaded, and returns the SHA-512 as bytes.
+    /// Imports and downloads both call this, so a malformed expectation fails the same way in each.
     /// </summary>
-    internal async Task<bool> SatisfiesAsync(Sha1 sha1, ExpectedContent expected, CancellationToken cancellationToken)
+    internal static byte[]? Validate(ExpectedContent? expected, string parameterName)
     {
-        if (expected.Sha1 is { } other && other != sha1) return false;
-        var expectedSha512 = ParseSha512(expected.Sha512);
-        if (await verifier.VerifyAsync(sha1, VerifyMode.Fast, cancellationToken) != ObjectState.Valid) return false;
-        return await FindMismatchAsync(new FileInfo(layout.ObjectPath(sha1)), expected, expectedSha512, cancellationToken)
-            is null;
+        if (expected?.Size < 0) throw new ArgumentException("The expected size cannot be negative.", parameterName);
+        if (expected?.Sha512 is not { } hex) return null;
+        if (hex.Length != 128) throw new ArgumentException("SHA-512 must be 128 hex characters.", parameterName);
+        try
+        {
+            return Convert.FromHexString(hex);
+        }
+        catch (FormatException e)
+        {
+            throw new ArgumentException("SHA-512 must be 128 hex characters.", parameterName, e);
+        }
+    }
+
+    /// <summary>
+    /// What an import of <paramref name="expected"/> answers without reading any content. When the store holds an
+    /// intact object under the expected SHA-1, the object must still meet the other expectations, so that the
+    /// answer is the same as for an empty store: <see cref="ImportOutcome.AlreadyPresent"/> when it does, a
+    /// <see cref="StoreError.ContentMismatch"/> when it does not. Returns <see langword="null"/> when there is no
+    /// SHA-1 or no intact object. Downloads ask this before and after taking the download lock.
+    /// </summary>
+    /// <param name="expectedSha512">The SHA-512 from <see cref="Validate"/>.</param>
+    internal async Task<ImportResult?> FindExistingAsync(
+        ExpectedContent expected,
+        byte[]? expectedSha512,
+        CancellationToken cancellationToken)
+    {
+        if (expected.Sha1 is not { } known
+            || await verifier.VerifyAsync(known, VerifyMode.Fast, cancellationToken) != ObjectState.Valid)
+            return null;
+
+        var existing = new FileInfo(layout.ObjectPath(known));
+        if (await FindMismatchAsync(existing, expected, expectedSha512, cancellationToken) is { } detail)
+            throw Mismatch(detail);
+        return new ImportResult(known, existing.Length, ImportOutcome.AlreadyPresent);
     }
 
     /// <summary>Describes how an intact stored object differs from the expectations, or null when it does not.</summary>
@@ -174,20 +193,6 @@ sealed class ObjectImporter(StoreLayout layout, ObjectVerifier verifier, Verific
 
     static StoreException Mismatch(string detail) =>
         new(StoreError.ContentMismatch, $"The content does not match: {detail}.");
-
-    static byte[]? ParseSha512(string? hex)
-    {
-        if (hex is null) return null;
-        if (hex.Length != 128) throw new ArgumentException("SHA-512 must be 128 hex characters.", nameof(hex));
-        try
-        {
-            return Convert.FromHexString(hex);
-        }
-        catch (FormatException e)
-        {
-            throw new ArgumentException("SHA-512 must be 128 hex characters.", nameof(hex), e);
-        }
-    }
 
     /// <summary>
     /// The part file belongs to this import and was never linked, so clearing its read-only flag is safe. A part

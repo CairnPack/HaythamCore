@@ -17,6 +17,7 @@ public sealed class ObjectDownloaderTests : IDisposable
     readonly TempStoreDirectory _dir = new();
     readonly FakeHttpHandler _http = new();
     readonly List<TimeSpan> _delays = [];
+    readonly TaskCompletionSource _firstWait = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     static CancellationToken Token => TestContext.Current.CancellationToken;
 
@@ -25,10 +26,11 @@ public sealed class ObjectDownloaderTests : IDisposable
             store,
             new HttpClient(_http),
             options ?? new DownloadOptions { UserAgent = "store-tests/1.0" },
-            (wait, cancellationToken) =>
+            async (wait, cancellationToken) =>
             {
                 lock (_delays) _delays.Add(wait);
-                return Task.Delay(1, cancellationToken);
+                _firstWait.TrySetResult();
+                await Task.Delay(1, cancellationToken);
             });
 
     static ObtainRequest Request(params string[] urls) =>
@@ -89,6 +91,51 @@ public sealed class ObjectDownloaderTests : IDisposable
 
         Assert.Equal(ImportOutcome.AlreadyPresent, result.Outcome);
         Assert.Null(result.Source);
+        Assert.Empty(_http.Requests);
+    }
+
+    public static TheoryData<long?, string?> ExpectationsTheStoredObjectMisses => new()
+    {
+        { Body.Length + 1, null },
+        { null, new string('0', 128) },
+    };
+
+    [Theory]
+    [MemberData(nameof(ExpectationsTheStoredObjectMisses))]
+    public async Task A_stored_object_that_misses_the_expected_size_or_sha512_fails_as_an_import_would(
+        long? size,
+        string? sha512)
+    {
+        var store = _dir.Create();
+        await store.ImportBytesAsync(Encoding.UTF8.GetBytes(Body), cancellationToken: Token);
+        _http.Respond(Modrinth, HttpStatusCode.OK, Body);
+        var imported = await Assert.ThrowsAsync<StoreException>(() => store.ImportBytesAsync(
+            Encoding.UTF8.GetBytes(Body),
+            new ExpectedContent { Sha1 = BodySha1, Size = size, Sha512 = sha512 },
+            Token));
+
+        var obtained = await Assert.ThrowsAsync<StoreException>(
+            () => Downloader(store).ObtainAsync(Request(Modrinth) with { Size = size, Sha512 = sha512 }, Token));
+
+        Assert.Equal(StoreError.ContentMismatch, obtained.Error);
+        Assert.Equal(imported.Message, obtained.Message);
+        Assert.Empty(_http.Requests);
+    }
+
+    [Fact]
+    public async Task A_stored_object_that_meets_the_expected_size_and_sha512_is_not_downloaded()
+    {
+        var store = _dir.Create();
+        await store.ImportBytesAsync(Encoding.UTF8.GetBytes(Body), cancellationToken: Token);
+        var request = Request(Modrinth) with
+        {
+            Size = Body.Length,
+            Sha512 = Convert.ToHexString(SHA512.HashData(Encoding.UTF8.GetBytes(Body))),
+        };
+
+        var result = await Downloader(store).ObtainAsync(request, Token);
+
+        Assert.Equal(new ObtainResult(BodySha1, Body.Length, ImportOutcome.AlreadyPresent, null), result);
         Assert.Empty(_http.Requests);
     }
 
@@ -386,6 +433,29 @@ public sealed class ObjectDownloaderTests : IDisposable
         var result = await waiting;
 
         Assert.Equal(ImportOutcome.AlreadyPresent, result.Outcome);
+        Assert.Empty(_http.Requests);
+    }
+
+    [Fact]
+    public async Task A_waiter_that_finds_a_stored_object_missing_the_expected_size_fails_without_downloading()
+    {
+        var store = _dir.Create();
+        _http.Respond(Modrinth, HttpStatusCode.OK, Body);
+        var held = await FileLock.AcquireExclusiveAsync(
+            store.Layout.DownloadLockPath(BodySha1),
+            ProgramInfo.Unknown,
+            "download",
+            TimeSpan.FromSeconds(1),
+            Task.Delay,
+            Token);
+
+        var waiting = Downloader(store).ObtainAsync(Request(Modrinth) with { Size = Body.Length + 1 }, Token);
+        await _firstWait.Task;
+        await store.ImportBytesAsync(Encoding.UTF8.GetBytes(Body), cancellationToken: Token);
+        held.Dispose();
+        var error = await Assert.ThrowsAsync<StoreException>(() => waiting);
+
+        Assert.Equal(StoreError.ContentMismatch, error.Error);
         Assert.Empty(_http.Requests);
     }
 

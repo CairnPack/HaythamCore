@@ -239,21 +239,15 @@ public class ImportAndVerifyTests
     }
 
     [Fact]
-    public async Task An_existing_object_can_be_checked_against_expected_content()
+    public async Task Without_a_stored_object_under_the_expected_sha1_the_answer_needs_the_content()
     {
         using var dir = new TempStoreDirectory();
         var store = dir.Create();
         await store.ImportBytesAsync(Content, cancellationToken: Token);
-        var sha512 = Convert.ToHexString(SHA512.HashData(Content));
 
-        Assert.True(await store.Importer.SatisfiesAsync(
-            ContentSha1, new ExpectedContent { Size = Content.Length, Sha512 = sha512 }, Token));
-        Assert.False(await store.Importer.SatisfiesAsync(
-            ContentSha1, new ExpectedContent { Size = Content.Length + 1 }, Token));
-        Assert.False(await store.Importer.SatisfiesAsync(
-            ContentSha1, new ExpectedContent { Sha512 = new string('0', 128) }, Token));
-        Assert.False(await store.Importer.SatisfiesAsync(
-            Sha1.Parse("a9993e364706816aba3e25717850c26c9cd0d89d"), new ExpectedContent(), Token));
+        Assert.Null(await store.Importer.FindExistingAsync(
+            new ExpectedContent { Sha1 = Sha1.Parse("a9993e364706816aba3e25717850c26c9cd0d89d") }, null, Token));
+        Assert.Null(await store.Importer.FindExistingAsync(new ExpectedContent { Size = Content.Length }, null, Token));
     }
 
     [Fact]

@@ -50,7 +50,7 @@ Status: implemented
 4. 先把 `.part` 设成只读，再不覆盖地移进 `objects/<前两位>/<sha1>`。对象在出现于 `objects/` 的那一刻就已经是只读的，没有可写的窗口。移入成功后用移入后的文件属性记下验证记录，所以同一进程里对刚纳入的对象做第一次快速验证不必重新哈希（sha1 在写入时已经算过）。
 5. 目标已经存在时完整验证它：好的就返回 `AlreadyPresent`；坏的就按下面的“坏对象”处理后重试，最多 3 次。
 
-“已有对象是否满足期望内容”由内部方法 `ObjectImporter.SatisfiesAsync(Sha1, ExpectedContent, CancellationToken)` 回答，下载侧在加锁前后判断“是否已经有了”时复用它，规则只在一处。
+第 1 步由内部方法 `ObjectImporter.FindExistingAsync` 完成：已有对象全部相符时返回 `AlreadyPresent`，不符时抛 `ContentMismatch`，没有完好的对象时返回空。期望本身的格式（sha512 的长度与字符、大小不能是负数）由 `ObjectImporter.Validate` 检查。下载侧在加锁前后判断“是否已经有了”时复用这两个方法，所以下载与纳入对同样的输入给出同样的回答，规则只在一处（理由见[下载笔记](2026-10-25-store-obtain-and-download-lock.md)）。
 
 `.part` 是本次纳入自己的文件，从没被链接过，所以失败时可以先清掉只读再删除；删不掉就留给以后的临时目录清理（§4.4 的“超过一天的 `object-*.part`”）。
 

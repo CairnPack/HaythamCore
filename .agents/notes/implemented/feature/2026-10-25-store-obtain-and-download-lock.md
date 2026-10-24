@@ -17,9 +17,9 @@ Status: implemented
 ### obtain 的流程
 
 1. 仓库只读时抛 `StoreError.ReadOnly`。然后校验请求本身：URL 至少一个，而且都是绝对的 HTTP(S) 地址；`Sha512` 如果给了，必须是 128 个十六进制字符；`Size` 如果给了，不能是负数。不合格就抛 `ArgumentException`（见下面的“参数提前校验”）。
-2. 快速验证对象：完好就返回 `AlreadyPresent`，不加锁、不联网。
+2. 检查仓库里是否已有这个对象，规则与纳入时的快速路径相同，由同一个内部方法 `ObjectImporter.FindExistingAsync` 回答：对象完好、而且大小与 sha512（请求给了才核对）都符合期望时，返回 `AlreadyPresent`；对象完好但不符合时，抛 `StoreError.ContentMismatch`，消息与对同样的输入调用纳入时完全相同；两种情况都不加锁、不联网。对象不在或已损坏时继续下一步。
 3. 拿下载锁 `locks/download/<sha1 前 3 位>`，最多排队 `LockTimeout`（默认 15 分钟），可以取消；超时抛 `StoreError.LockTimeout`，消息里列出占用者。
-4. 拿到锁后再验证一次：等锁期间，前一个持有者可能刚把它下载好。这一步让“同一个文件只下载一次”在进程内与进程间都成立。
+4. 拿到锁后按第 2 步再检查一次：等锁期间，前一个持有者可能刚把它下载好。这一步让“同一个文件只下载一次”在进程内与进程间都成立；前一个持有者放进来的对象不符合这次的期望时，同样抛 `ContentMismatch`。
 5. 按顺序试每个候选 URL，每个最多 `MaxAttemptsPerUrl` 次（默认 3）。收到 2xx 的响应头后，如果请求给了 `Size`、响应也给了 `Content-Length`，两者不同就不读响应体，直接换下一个 URL。否则响应体包上空闲超时（见下），流进第一批的纳入流程：先写 `.part`，核对 sha1、大小、sha512，再只读地移入。
 6. 全部失败时抛 `StoreError.DownloadFailed`，消息按 URL 列出每一个失败原因。
 
@@ -64,7 +64,11 @@ Status: implemented
 参数错误要在拿锁、联网之前报出来，否则要等某个 URL 回 200 才暴露；所有 URL 都 404 时会被 `DownloadFailed` 掩盖，对象已经在仓库里时完全不报。
 
 - 构造函数：`UserAgent` 用 `request.Headers.UserAgent.TryParseAdd`（`HttpHeaderValueCollection<T>.TryParseAdd`） 试解析一次（例如 `name/1.0 contact@x.com` 不合法，联系方式要放进括号）；`RetryDelay`、`MaxRetryAfter` 不能是负数；`MaxRetryAfter` 与 `ReadIdleTimeout` 不能超过 `int.MaxValue` 毫秒（约 24.8 天），因为 `Task.Delay` 与 `CancelAfter` 不接受更长的计时；`ReadIdleTimeout` 还必须大于零，或者是 `Timeout.InfiniteTimeSpan`。
-- `ObtainAsync`：见流程第 1 步。SHA-512 的格式规则和纳入时 `ObjectImporter.ParseSha512` 的一样（长度 128，大小写都接受）。
+- `ObtainAsync`：见流程第 1 步。`Sha512` 与 `Size` 的检查和纳入时用的是同一个函数 `ObjectImporter.Validate`（SHA-512 长度 128，大小写都接受；大小不能是负数），所以两边的规则和错误消息不会分开演变。
+
+### 已有对象不符合期望时为什么报错，而不是重新下载
+
+仓库以 sha1 为键，`objects/` 下同一个 sha1 只能放一份内容。已有对象的 sha1 验证通过，却和请求的大小或 sha512 对不上，说明调用方给的元数据和这个 sha1 互相矛盾（或者真的遇到了 SHA-1 碰撞）。重新下载帮不上忙：下载回来的内容进入纳入流程时，会在同一个快速路径上遇到同一个已有对象，再抛一次 `ContentMismatch`；而 `TryUrlAsync` 会把它当成“这个地址的文件不对”换下一个 URL，最后变成一条误导人的 `DownloadFailed`，还白发了请求。所以在拿锁、联网之前就报出和纳入一致的错误。
 
 ### 跨进程锁
 
@@ -105,6 +109,7 @@ POSIX 上，`FileShare` 背后的 `flock` 可以被 AppContext 开关 `System.IO
 - **用 `HttpClient.Timeout` 管住整个下载（`ResponseContentRead`，或者给整个响应体设一个总时限）** — 最有力的理由：不用另写流包装，一个参数就能限制占锁的总时间。不采用：`ResponseContentRead` 会把整个文件先缓冲进内存；总时限会掐断又大又慢、但一直有数据的正常下载。空闲超时只抓“停住”这一种情况。
 - **把空闲超时写进 `ContentHasher` 的读循环** — 最有力的理由：读循环本来就在逐块读，在那里重置计时器最直接，不用多一个类。不采用：那个循环也用于从本地文件纳入，没有网络就没有空闲超时可言；放在下载层，纳入那边的代码不必知道网络。
 - **退避超过上限时截到 `MaxRetryAfter`，继续重试** — 最有力的理由：调用方调大 `MaxAttemptsPerUrl` 就是想多试几次，截断能让每一次都真的发生。不采用：等待期间一直占着下载锁，64 次尝试会让同一片的其他下载跟着等上一个小时；还有别的候选 URL 时，换地址更好。而且状态码分支原本就是“超过上限就换地址”，两个分支用同一条规则更容易讲清楚。
+- **已有对象不符合期望时当作“没有”，照常加锁下载** — 最有力的理由：下载侧只需要一个“是否已经满足”的布尔判断（纳入侧原本为此提供了 `SatisfiesAsync`），流程最简单。不采用：同一个 sha1 下载不来别的内容，纳入时还会撞上同一个已有对象，结果是白发请求，最后报一条误导人的 `DownloadFailed`；而对同样的输入调用纳入得到的是 `ContentMismatch`，两个入口的回答不一致。所以把纳入的快速路径整个抽成 `FindExistingAsync`，返回“已有／没有”，不符时直接抛错，取代了 `SatisfiesAsync`。
 - **把没有 sha1 的下载也一起做** — 最有力的理由：Fabric、Quilt 的 Maven 库没有 sha1，启动核心迟早要用。不采用（2026-10-25 用户确认）：要先定 `references/` 的格式、命中后的验证与 GC 时的清理，属于 E4；没有它，每次都得重新下载。
 
 ## Consequences
@@ -115,8 +120,7 @@ POSIX 上，`FileShare` 背后的 `flock` 可以被 AppContext 开关 `System.IO
 - 代价：仍然没有仓库锁，obtain 与 GC 还不能安全并存；GC 落地时要补上写入会话（锁与并发笔记的“仓库锁”）。
 - 代价：同一片里不相干的两个下载要排队；同时下载 8 个对象时约 0.7% 的概率（锁与并发笔记的估算）。
 - 代价：空闲超时的计时器不经过 `delay` 回调，相关测试要真的等 100 ms 左右；之后改用 `TimeProvider` 注入时要一起换掉。
-- 代价：SHA-512 的格式检查在 `ObjectDownloader` 与 `ObjectImporter` 里各写了一份，两处规则要保持一致，以后可以合成一个共用的函数。
 - 代价：POSIX 上“被占用”的判断依赖 .NET 把 errno 放进 `HResult`，这是 runtime 源码里的行为，没有正式文档；本机只在 Windows 上跑过测试，Haytham Core 的 CI 目前只在三平台 `dotnet build`，不跑测试。
-- 测试：`FileLockTests` 覆盖同一进程的第二个句柄排队、超时并列出占用者，记录只在持有期间存在，已结束进程的记录被清掉、不显示，等待可取消。`ObjectDownloaderTests` 覆盖下载与 User-Agent、已存在时不联网、5xx 翻倍重试、429 遵守 `Retry-After`、超过上限换地址、404 不重试、内容不符换地址、网络错误重试到上限并列出每个原因、等锁超时列出占用者、等锁之后发现对象已在而不再下载、并发 obtain 只下载一次、只读仓库拒绝下载；还覆盖响应体停住时超时并重试、一直停住时失败原因写明空闲超时、停住时调用方取消照常抛出且不重试、读响应体中途出错时重试、不合法的 User-Agent 在构造时报错、不合法的 SHA-512 与负的大小在任何请求之前报错（对象已在仓库时也报）、退避超过上限时换地址且不说成 `Retry-After`（状态码与网络错误两个分支）、64 次尝试不溢出、`Content-Length` 与期望大小不同时不读响应体就换地址。
+- 测试：`FileLockTests` 覆盖同一进程的第二个句柄排队、超时并列出占用者，记录只在持有期间存在，已结束进程的记录被清掉、不显示，等待可取消。`ObjectDownloaderTests` 覆盖下载与 User-Agent、已存在时不联网、5xx 翻倍重试、429 遵守 `Retry-After`、超过上限换地址、404 不重试、内容不符换地址、网络错误重试到上限并列出每个原因、等锁超时列出占用者、等锁之后发现对象已在而不再下载、已有对象的大小或 sha512 不符时抛出与纳入相同的 `ContentMismatch` 且不发请求（加锁前与等锁之后两处）、已有对象全部相符时返回 `AlreadyPresent`、并发 obtain 只下载一次、只读仓库拒绝下载；还覆盖响应体停住时超时并重试、一直停住时失败原因写明空闲超时、停住时调用方取消照常抛出且不重试、读响应体中途出错时重试、不合法的 User-Agent 在构造时报错、不合法的 SHA-512 与负的大小在任何请求之前报错（对象已在仓库时也报）、退避超过上限时换地址且不说成 `Retry-After`（状态码与网络错误两个分支）、64 次尝试不溢出、`Content-Length` 与期望大小不同时不读响应体就换地址。
 - 验证缺口：空闲超时只用测试里的假流验证过；真实的 `SocketsHttpHandler` 在读被取消时抛什么异常没有实测，代码按计时器状态判断，就是为了不依赖这一点。
 - 验证缺口：锁与并发笔记要求的“子进程持锁”契约测试还没有，现在只用同一进程的两个句柄验证；POSIX 上的行为没有实测；`DisableFileLocking` 的只读检查没有测试（Windows 上不生效，在测试进程里打开开关会影响其他测试）。

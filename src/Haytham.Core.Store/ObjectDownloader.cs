@@ -68,14 +68,15 @@ public sealed class ObjectDownloader
         foreach (var url in request.Urls)
             if (!url.IsAbsoluteUri || (url.Scheme != Uri.UriSchemeHttps && url.Scheme != Uri.UriSchemeHttp))
                 throw new ArgumentException($"'{url}' is not an absolute HTTP(S) URL.", nameof(request));
-        // The importer checks these too, but only once a URL answers 200; a 404 everywhere or an object already
-        // in the store would hide the mistake.
-        if (request.Sha512 is { } sha512 && (sha512.Length != 128 || !sha512.All(char.IsAsciiHexDigit)))
-            throw new ArgumentException("SHA-512 must be 128 hex characters.", nameof(request));
-        if (request.Size < 0) throw new ArgumentException("The expected size cannot be negative.", nameof(request));
-
         var sha1 = request.Sha1;
-        if (await IsPresentAsync(sha1, cancellationToken)) return Present(sha1);
+        var expected = new ExpectedContent { Sha1 = sha1, Size = request.Size, Sha512 = request.Sha512 };
+        // Checked before anything else: a 404 everywhere or an object already in the store would hide the mistake.
+        var expectedSha512 = ObjectImporter.Validate(expected, nameof(request));
+
+        // A stored object that misses the expected size or SHA-512 fails here as an import would: under the same
+        // SHA-1, no download can bring other content.
+        if (await _store.Importer.FindExistingAsync(expected, expectedSha512, cancellationToken) is { } existing)
+            return Present(existing);
 
         // Held across retries and Retry-After waits: whoever waits for this lock wants this very object.
         using var held = await FileLock.AcquireExclusiveAsync(
@@ -87,9 +88,9 @@ public sealed class ObjectDownloader
             cancellationToken);
 
         // Whoever held the lock before may have just downloaded it.
-        if (await IsPresentAsync(sha1, cancellationToken)) return Present(sha1);
+        if (await _store.Importer.FindExistingAsync(expected, expectedSha512, cancellationToken) is { } downloaded)
+            return Present(downloaded);
 
-        var expected = new ExpectedContent { Sha1 = sha1, Size = request.Size, Sha512 = request.Sha512 };
         var failures = new List<string>();
         foreach (var url in request.Urls)
         {
@@ -193,11 +194,7 @@ public sealed class ObjectDownloader
         }
     }
 
-    async Task<bool> IsPresentAsync(Sha1 sha1, CancellationToken cancellationToken) =>
-        await _store.Verifier.VerifyAsync(sha1, VerifyMode.Fast, cancellationToken) == ObjectState.Valid;
-
-    ObtainResult Present(Sha1 sha1) =>
-        new(sha1, new FileInfo(_store.Layout.ObjectPath(sha1)).Length, ImportOutcome.AlreadyPresent, null);
+    static ObtainResult Present(ImportResult existing) => new(existing.Sha1, existing.Size, existing.Outcome, null);
 
     /// <summary>
     /// <see cref="DownloadOptions.RetryDelay"/> doubled for every earlier attempt. It stops at
