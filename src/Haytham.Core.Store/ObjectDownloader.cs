@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Net;
 using System.Net.Http.Headers;
 
@@ -10,6 +11,10 @@ namespace Haytham.Core.Store;
 /// </summary>
 public sealed class ObjectDownloader
 {
+    /// <summary>The longest single wait or timer: <see cref="Task.Delay(TimeSpan)"/> and
+    /// <see cref="CancellationTokenSource.CancelAfter(TimeSpan)"/> refuse longer ones.</summary>
+    static readonly TimeSpan LongestTimer = TimeSpan.FromMilliseconds(int.MaxValue);
+
     readonly ContentStore _store;
     readonly HttpClient _http;
     readonly DownloadOptions _options;
@@ -21,16 +26,34 @@ public sealed class ObjectDownloader
     {
     }
 
-    /// <param name="delay">Every wait (retries, lock backoff) goes through here, so tests do not sleep.</param>
+    /// <param name="delay">
+    /// Every wait (retries, lock backoff) goes through here, so tests do not sleep. The read idle timeout does not:
+    /// it is a timer inside <see cref="IdleTimeoutStream"/>.
+    /// </param>
     internal ObjectDownloader(
         ContentStore store,
         HttpClient http,
         DownloadOptions options,
         Func<TimeSpan, CancellationToken, Task> delay)
     {
+        // Checked here once, so a bad option fails now rather than on every obtain after it has taken a lock.
         ArgumentException.ThrowIfNullOrWhiteSpace(options.UserAgent);
+        using (var probe = new HttpRequestMessage())
+            if (!probe.Headers.UserAgent.TryParseAdd(options.UserAgent))
+                throw new ArgumentException(
+                    $"'{options.UserAgent}' is not a valid User-Agent; a contact address goes in parentheses.",
+                    nameof(options));
         ArgumentOutOfRangeException.ThrowIfLessThan(options.MaxAttemptsPerUrl, 1);
         ArgumentOutOfRangeException.ThrowIfLessThan(options.MaxConcurrentRequests, 1);
+        ArgumentOutOfRangeException.ThrowIfLessThan(options.RetryDelay, TimeSpan.Zero);
+        ArgumentOutOfRangeException.ThrowIfLessThan(options.MaxRetryAfter, TimeSpan.Zero);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(options.MaxRetryAfter, LongestTimer);
+        if (options.ReadIdleTimeout != Timeout.InfiniteTimeSpan)
+        {
+            ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(options.ReadIdleTimeout, TimeSpan.Zero);
+            ArgumentOutOfRangeException.ThrowIfGreaterThan(options.ReadIdleTimeout, LongestTimer);
+        }
+
         _store = store;
         _http = http;
         _options = options;
@@ -45,6 +68,11 @@ public sealed class ObjectDownloader
         foreach (var url in request.Urls)
             if (!url.IsAbsoluteUri || (url.Scheme != Uri.UriSchemeHttps && url.Scheme != Uri.UriSchemeHttp))
                 throw new ArgumentException($"'{url}' is not an absolute HTTP(S) URL.", nameof(request));
+        // The importer checks these too, but only once a URL answers 200; a 404 everywhere or an object already
+        // in the store would hide the mistake.
+        if (request.Sha512 is { } sha512 && (sha512.Length != 128 || !sha512.All(char.IsAsciiHexDigit)))
+            throw new ArgumentException("SHA-512 must be 128 hex characters.", nameof(request));
+        if (request.Size < 0) throw new ArgumentException("The expected size cannot be negative.", nameof(request));
 
         var sha1 = request.Sha1;
         if (await IsPresentAsync(sha1, cancellationToken)) return Present(sha1);
@@ -82,7 +110,8 @@ public sealed class ObjectDownloader
         for (var attempt = 1; ; attempt++)
         {
             string failure;
-            TimeSpan? wait;
+            TimeSpan wait;
+            var waitSource = "backoff";
             await _requests.WaitAsync(cancellationToken);
             try
             {
@@ -95,7 +124,18 @@ public sealed class ObjectDownloader
 
                 if (response.IsSuccessStatusCode)
                 {
-                    await using var body = await response.Content.ReadAsStreamAsync(cancellationToken);
+                    // An error page or another build of the file is known to be wrong before any of it is read.
+                    if (expected.Size is { } size
+                        && response.Content.Headers.ContentLength is { } length
+                        && length != size)
+                    {
+                        failures.Add($"{url}: Content-Length {length} bytes, expected {size}");
+                        return null;
+                    }
+
+                    await using var body = new IdleTimeoutStream(
+                        await response.Content.ReadAsStreamAsync(cancellationToken),
+                        _options.ReadIdleTimeout);
                     return await _store.Importer.ImportAsync(body, expected, cancellationToken);
                 }
 
@@ -107,11 +147,14 @@ public sealed class ObjectDownloader
                 }
 
                 failure = $"HTTP {status}";
-                wait = RetryAfter(response.Headers.RetryAfter) ?? Backoff(attempt);
-                if (wait > _options.MaxRetryAfter)
+                if (RetryAfter(response.Headers.RetryAfter) is { } retryAfter)
                 {
-                    failures.Add($"{url}: HTTP {status} with Retry-After {wait.Value.TotalSeconds:0}s, above the limit");
-                    return null;
+                    wait = retryAfter;
+                    waitSource = "Retry-After";
+                }
+                else
+                {
+                    wait = Backoff(attempt);
                 }
             }
             catch (StoreException e) when (e.Error == StoreError.ContentMismatch)
@@ -136,7 +179,17 @@ public sealed class ObjectDownloader
                 return null;
             }
 
-            await _delay(wait.Value, cancellationToken);
+            // The wait holds the download lock; past the limit, the next candidate URL is the better bet.
+            var limit = _options.MaxRetryAfter;
+            if (wait > limit)
+            {
+                failures.Add(string.Create(
+                    CultureInfo.InvariantCulture,
+                    $"{url}: {failure}, {waitSource} {wait.TotalSeconds:0}s is above the {limit.TotalSeconds:0}s limit"));
+                return null;
+            }
+
+            await _delay(wait, cancellationToken);
         }
     }
 
@@ -146,7 +199,18 @@ public sealed class ObjectDownloader
     ObtainResult Present(Sha1 sha1) =>
         new(sha1, new FileInfo(_store.Layout.ObjectPath(sha1)).Length, ImportOutcome.AlreadyPresent, null);
 
-    TimeSpan Backoff(int attempt) => _options.RetryDelay * Math.Pow(2, attempt - 1);
+    /// <summary>
+    /// <see cref="DownloadOptions.RetryDelay"/> doubled for every earlier attempt. It stops at
+    /// <see cref="TimeSpan.MaxValue"/> instead of overflowing, which a large <see cref="DownloadOptions.MaxAttemptsPerUrl"/>
+    /// can reach when <c>Retry-After: 0</c> answers kept the earlier waits short.
+    /// </summary>
+    TimeSpan Backoff(int attempt)
+    {
+        var wait = _options.RetryDelay;
+        for (var i = 1; i < attempt && wait < TimeSpan.MaxValue; i++)
+            wait = wait > TimeSpan.MaxValue - wait ? TimeSpan.MaxValue : wait + wait;
+        return wait;
+    }
 
     static bool IsRetryable(HttpStatusCode status) =>
         status is HttpStatusCode.RequestTimeout or HttpStatusCode.TooManyRequests || (int)status >= 500;
@@ -166,9 +230,10 @@ public sealed class ObjectDownloader
     /// <summary>
     /// Network failures only. Errors writing the part file are ordinary <see cref="IOException"/>s and are not
     /// retried: a full disk stays full. An <see cref="HttpClient"/> timeout surfaces as a cancellation that the
-    /// caller did not ask for.
+    /// caller did not ask for; a body that stops sending data, as the <see cref="TimeoutException"/> from
+    /// <see cref="IdleTimeoutStream"/>.
     /// </summary>
     static bool IsTransient(Exception e, CancellationToken cancellationToken) =>
-        e is HttpRequestException or HttpIOException
+        e is HttpRequestException or HttpIOException or TimeoutException
         || (e is TaskCanceledException && !cancellationToken.IsCancellationRequested);
 }

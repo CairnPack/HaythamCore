@@ -12,8 +12,22 @@ public sealed record DownloadOptions
     /// <summary>Wait before the second try when the server gives no <c>Retry-After</c>; it doubles after that.</summary>
     public TimeSpan RetryDelay { get; init; } = TimeSpan.FromSeconds(1);
 
-    /// <summary>The longest <c>Retry-After</c> that is waited for; a longer one moves on to the next URL.</summary>
+    /// <summary>
+    /// The longest wait before a retry, whether the server asked for it with <c>Retry-After</c> or it is the doubled
+    /// <see cref="RetryDelay"/>; a longer one moves on to the next URL.
+    /// </summary>
     public TimeSpan MaxRetryAfter { get; init; } = TimeSpan.FromSeconds(60);
+
+    /// <summary>
+    /// How long a response body may go without sending any data before the attempt is given up as a network error
+    /// and retried. The time is counted per read, so a slow but steady download is never cut off, and time spent
+    /// writing to disk does not count. <see cref="Timeout.InfiniteTimeSpan"/> turns it off.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="HttpClient.Timeout"/> stops counting once the response headers arrive, so without this a server
+    /// that sends headers and then nothing would hold the download lock until the caller gives up.
+    /// </remarks>
+    public TimeSpan ReadIdleTimeout { get; init; } = TimeSpan.FromSeconds(30);
 
     /// <summary>How long to queue for the download lock while another download of the same shard runs.</summary>
     public TimeSpan LockTimeout { get; init; } = TimeSpan.FromMinutes(15);

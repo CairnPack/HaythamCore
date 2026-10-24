@@ -42,6 +42,23 @@ public sealed class ObjectDownloaderTests : IDisposable
             return Task.FromResult(response);
         };
 
+    /// <summary>A 200 whose body is <paramref name="body"/>, read as it streams rather than buffered first.</summary>
+    static FakeHttpHandler.Responder Streamed(Stream body, long? contentLength = null) =>
+        (_, _) =>
+        {
+            var content = new StreamContent(body);
+            content.Headers.ContentLength = contentLength;
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = content });
+        };
+
+    /// <summary>A body that sends nothing until its read is cancelled.</summary>
+    static ScriptedStream Stalled() =>
+        new([], async cancellationToken =>
+        {
+            await Task.Delay(Timeout.Infinite, cancellationToken);
+            return 0;
+        });
+
     public void Dispose()
     {
         _http.Dispose();
@@ -159,6 +176,177 @@ public sealed class ObjectDownloaderTests : IDisposable
         Assert.Empty(_dir.TempEntries());
     }
 
+    [Fact(Timeout = 10_000)]
+    public async Task A_body_that_stops_sending_data_times_out_and_is_retried()
+    {
+        var store = _dir.Create();
+        _http.Respond(HttpMethod.Get, Modrinth, Streamed(Stalled())).Respond(Modrinth, HttpStatusCode.OK, Body);
+        var options = new DownloadOptions { UserAgent = "store-tests/1.0", ReadIdleTimeout = TimeSpan.FromMilliseconds(100) };
+
+        var result = await Downloader(store, options).ObtainAsync(Request(Modrinth), TestContext.Current.CancellationToken);
+
+        Assert.Equal(ImportOutcome.Added, result.Outcome);
+        Assert.Equal(2, _http.Requests.Count);
+        Assert.Equal([TimeSpan.FromSeconds(1)], _delays);
+        Assert.Empty(_dir.TempEntries());
+    }
+
+    [Fact(Timeout = 10_000)]
+    public async Task A_body_that_keeps_stalling_is_reported_as_an_idle_timeout()
+    {
+        var store = _dir.Create();
+        _http.Respond(HttpMethod.Get, Modrinth, (request, cancellationToken) => Streamed(Stalled())(request, cancellationToken));
+        var options = new DownloadOptions
+        {
+            UserAgent = "store-tests/1.0",
+            MaxAttemptsPerUrl = 2,
+            ReadIdleTimeout = TimeSpan.FromMilliseconds(100),
+        };
+
+        var error = await Assert.ThrowsAsync<StoreException>(
+            () => Downloader(store, options).ObtainAsync(Request(Modrinth), TestContext.Current.CancellationToken));
+
+        Assert.Equal(StoreError.DownloadFailed, error.Error);
+        Assert.Contains("No data received for 0.1s", error.Message);
+        Assert.Contains("after 2 attempts", error.Message);
+    }
+
+    [Fact(Timeout = 10_000)]
+    public async Task Cancelling_while_the_body_is_stalled_throws_and_is_not_retried()
+    {
+        var store = _dir.Create();
+        _http.Respond(HttpMethod.Get, Modrinth, Streamed(Stalled()));
+        using var cancel = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        cancel.CancelAfter(TimeSpan.FromMilliseconds(100));
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => Downloader(store).ObtainAsync(Request(Modrinth), cancel.Token));
+
+        Assert.Single(_http.Requests);
+        Assert.Empty(_delays);
+        Assert.Empty(_dir.TempEntries());
+    }
+
+    [Fact]
+    public async Task A_network_error_while_reading_the_body_is_retried()
+    {
+        var store = _dir.Create();
+        var broken = new ScriptedStream(
+            Encoding.UTF8.GetBytes(Body[..10]),
+            _ => Task.FromException<int>(new HttpIOException(HttpRequestError.ResponseEnded, "connection reset mid-body")));
+        _http.Respond(HttpMethod.Get, Modrinth, Streamed(broken)).Respond(Modrinth, HttpStatusCode.OK, Body);
+
+        var result = await Downloader(store).ObtainAsync(Request(Modrinth), Token);
+
+        Assert.Equal(ImportOutcome.Added, result.Outcome);
+        Assert.Equal(2, _http.Requests.Count);
+        Assert.Equal([TimeSpan.FromSeconds(1)], _delays);
+        Assert.Empty(_dir.TempEntries());
+    }
+
+    [Fact]
+    public void A_malformed_user_agent_is_rejected_by_the_constructor()
+    {
+        var store = _dir.Create();
+
+        Assert.Throws<ArgumentException>(
+            () => Downloader(store, new DownloadOptions { UserAgent = "name/1.0 contact@x.com" }));
+    }
+
+    public static TheoryData<string?, long?> MalformedExpectations => new()
+    {
+        { "not-hex", null },
+        { new string('g', 128), null },
+        { null, -1 },
+    };
+
+    [Theory]
+    [MemberData(nameof(MalformedExpectations))]
+    public async Task A_malformed_sha512_or_size_is_reported_before_any_request(string? sha512, long? size)
+    {
+        var store = _dir.Create();
+        _http.Respond(Modrinth, HttpStatusCode.NotFound).Respond(CurseForge, HttpStatusCode.NotFound);
+        var request = Request(Modrinth, CurseForge) with { Sha512 = sha512, Size = size };
+
+        await Assert.ThrowsAsync<ArgumentException>(() => Downloader(store).ObtainAsync(request, Token));
+
+        Assert.Empty(_http.Requests);
+    }
+
+    [Fact]
+    public async Task A_malformed_sha512_is_reported_even_when_the_object_is_already_in_the_store()
+    {
+        var store = _dir.Create();
+        await store.ImportBytesAsync(Encoding.UTF8.GetBytes(Body), cancellationToken: Token);
+
+        await Assert.ThrowsAsync<ArgumentException>(
+            () => Downloader(store).ObtainAsync(Request(Modrinth) with { Sha512 = "not-hex" }, Token));
+    }
+
+    [Fact]
+    public async Task A_doubled_delay_above_the_limit_moves_on_and_is_not_called_retry_after()
+    {
+        var store = _dir.Create();
+        _http.Respond(Modrinth, HttpStatusCode.ServiceUnavailable);
+        var options = new DownloadOptions { UserAgent = "store-tests/1.0", RetryDelay = TimeSpan.FromSeconds(40) };
+
+        var error = await Assert.ThrowsAsync<StoreException>(
+            () => Downloader(store, options).ObtainAsync(Request(Modrinth), Token));
+
+        Assert.Contains($"{Modrinth}: HTTP 503, backoff 80s is above the 60s limit", error.Message);
+        Assert.DoesNotContain("Retry-After", error.Message);
+        Assert.Equal(2, _http.Requests.Count);
+        Assert.Equal([TimeSpan.FromSeconds(40)], _delays);
+    }
+
+    [Fact]
+    public async Task A_network_error_backoff_above_the_limit_moves_on()
+    {
+        var store = _dir.Create();
+        _http.Fail(Modrinth, new HttpRequestException("connection reset"));
+        var options = new DownloadOptions { UserAgent = "store-tests/1.0", RetryDelay = TimeSpan.FromSeconds(40) };
+
+        var error = await Assert.ThrowsAsync<StoreException>(
+            () => Downloader(store, options).ObtainAsync(Request(Modrinth), Token));
+
+        Assert.Contains($"{Modrinth}: connection reset, backoff 80s is above the 60s limit", error.Message);
+        Assert.Equal(2, _http.Requests.Count);
+        Assert.Equal([TimeSpan.FromSeconds(40)], _delays);
+    }
+
+    [Fact]
+    public async Task Many_attempts_do_not_overflow_the_backoff()
+    {
+        var store = _dir.Create();
+        // Retry-After: 0 keeps every wait short while the attempt count, which the backoff doubles on, keeps growing.
+        for (var i = 0; i < 63; i++)
+            _http.Respond(HttpMethod.Get, Modrinth, TooManyRequests(new RetryConditionHeaderValue(TimeSpan.Zero)));
+        _http.Respond(Modrinth, HttpStatusCode.ServiceUnavailable);
+        var options = new DownloadOptions { UserAgent = "store-tests/1.0", MaxAttemptsPerUrl = 64 };
+
+        var error = await Assert.ThrowsAsync<StoreException>(
+            () => Downloader(store, options).ObtainAsync(Request(Modrinth), Token));
+
+        Assert.Contains($"{Modrinth}: HTTP 503 after 64 attempts", error.Message);
+        Assert.Equal(64, _http.Requests.Count);
+    }
+
+    [Fact]
+    public async Task A_content_length_that_differs_from_the_expected_size_moves_on_without_reading_the_body()
+    {
+        var store = _dir.Create();
+        var unread = new ScriptedStream([], _ => throw new InvalidOperationException("The body was read."));
+        _http.Respond(HttpMethod.Get, Modrinth, Streamed(unread, contentLength: 10_000_000))
+            .Respond(CurseForge, HttpStatusCode.OK, Body);
+
+        var result = await Downloader(store).ObtainAsync(Request(Modrinth, CurseForge) with { Size = Body.Length }, Token);
+
+        Assert.Equal(new Uri(CurseForge), result.Source);
+        Assert.Equal(1, _http.Requests.Count(r => r.Url == new Uri(Modrinth)));
+        Assert.Empty(_delays);
+        Assert.Empty(_dir.TempEntries());
+    }
+
     [Fact]
     public async Task Waits_for_the_download_lock_and_times_out_naming_the_holder()
     {
@@ -233,5 +421,49 @@ public sealed class ObjectDownloaderTests : IDisposable
             () => Downloader(store).ObtainAsync(Request(Modrinth), Token));
 
         Assert.Equal(StoreError.ReadOnly, error.Error);
+    }
+
+    /// <summary>A response body that sends <c>prefix</c>, then answers every later read with <c>then</c>.</summary>
+    sealed class ScriptedStream(byte[] prefix, Func<CancellationToken, Task<int>> then) : Stream
+    {
+        int _position;
+
+        public override bool CanRead => true;
+
+        public override bool CanSeek => false;
+
+        public override bool CanWrite => false;
+
+        public override long Length => throw new NotSupportedException();
+
+        public override long Position
+        {
+            get => throw new NotSupportedException();
+            set => throw new NotSupportedException();
+        }
+
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            if (_position == prefix.Length) return await then(cancellationToken);
+            var count = Math.Min(buffer.Length, prefix.Length - _position);
+            prefix.AsMemory(_position, count).CopyTo(buffer);
+            _position += count;
+            return count;
+        }
+
+        public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken) =>
+            ReadAsync(buffer.AsMemory(offset, count), cancellationToken).AsTask();
+
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+
+        public override void Flush()
+        {
+        }
+
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+
+        public override void SetLength(long value) => throw new NotSupportedException();
+
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
     }
 }
