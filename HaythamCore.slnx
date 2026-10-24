@@ -7,5 +7,6 @@
   <Folder Name="/tests/">
     <Project Path="tests/Haytham.Core.Testing/Haytham.Core.Testing.csproj" />
     <Project Path="tests/Haytham.Core.Testing.Tests/Haytham.Core.Testing.Tests.csproj" />
+    <Project Path="tests/Haytham.Core.Store.Tests/Haytham.Core.Store.Tests.csproj" />
   </Folder>
 </Solution>

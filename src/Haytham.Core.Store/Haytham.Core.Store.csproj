@@ -1,3 +1,8 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
+  <ItemGroup>
+    <!-- Tests take file locks directly and ask the importer about stored objects. -->
+    <InternalsVisibleTo Include="Haytham.Core.Store.Tests" />
+  </ItemGroup>
+
 </Project>
