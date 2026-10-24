@@ -22,6 +22,12 @@ public enum StoreError
 
     /// <summary>Every candidate URL failed; the message lists why each one did.</summary>
     DownloadFailed,
+
+    /// <summary>
+    /// A corrupt object could not be replaced because another handle holds it open without sharing delete
+    /// (on Windows, for example a running game that opened the jar). Retry once the holder has closed it.
+    /// </summary>
+    ObjectInUse,
 }
 
 /// <summary>A store failure that callers can tell apart by <see cref="Error"/> instead of parsing the message.</summary>

@@ -200,6 +200,148 @@ public class ImportAndVerifyTests
         Assert.Equal(ObjectState.Corrupt, await store.VerifyAsync(ContentSha1, VerifyMode.Full, Token));
     }
 
+    public static TheoryData<ExpectedContent> MismatchesAgainstAnExistingObject() =>
+    [
+        new ExpectedContent { Sha1 = ContentSha1, Size = Content.Length + 1 },
+        new ExpectedContent { Sha1 = ContentSha1, Sha512 = new string('0', 128) },
+        new ExpectedContent { Sha1 = ContentSha1, Size = Content.Length, Sha512 = new string('0', 128) },
+    ];
+
+    [Theory]
+    [MemberData(nameof(MismatchesAgainstAnExistingObject))]
+    public async Task An_existing_object_is_checked_against_the_expected_size_and_sha512(ExpectedContent expected)
+    {
+        using var dir = new TempStoreDirectory();
+        var store = dir.Create();
+        await store.ImportBytesAsync(Content, cancellationToken: Token);
+
+        var error = await Assert.ThrowsAsync<StoreException>(() => store.ImportBytesAsync(Content, expected, Token));
+
+        Assert.Equal(StoreError.ContentMismatch, error.Error);
+    }
+
+    [Fact]
+    public async Task An_existing_object_that_matches_every_expectation_is_already_present()
+    {
+        using var dir = new TempStoreDirectory();
+        var store = dir.Create();
+        await store.ImportBytesAsync(Content, cancellationToken: Token);
+        var expected = new ExpectedContent
+        {
+            Sha1 = ContentSha1,
+            Size = Content.Length,
+            Sha512 = Convert.ToHexString(SHA512.HashData(Content)),
+        };
+
+        var result = await store.ImportBytesAsync(Content, expected, Token);
+
+        Assert.Equal(ImportOutcome.AlreadyPresent, result.Outcome);
+    }
+
+    [Fact]
+    public async Task An_existing_object_can_be_checked_against_expected_content()
+    {
+        using var dir = new TempStoreDirectory();
+        var store = dir.Create();
+        await store.ImportBytesAsync(Content, cancellationToken: Token);
+        var sha512 = Convert.ToHexString(SHA512.HashData(Content));
+
+        Assert.True(await store.Importer.SatisfiesAsync(
+            ContentSha1, new ExpectedContent { Size = Content.Length, Sha512 = sha512 }, Token));
+        Assert.False(await store.Importer.SatisfiesAsync(
+            ContentSha1, new ExpectedContent { Size = Content.Length + 1 }, Token));
+        Assert.False(await store.Importer.SatisfiesAsync(
+            ContentSha1, new ExpectedContent { Sha512 = new string('0', 128) }, Token));
+        Assert.False(await store.Importer.SatisfiesAsync(
+            Sha1.Parse("a9993e364706816aba3e25717850c26c9cd0d89d"), new ExpectedContent(), Token));
+    }
+
+    [Fact]
+    public async Task Copying_stops_soon_after_the_expected_size_is_exceeded()
+    {
+        using var dir = new TempStoreDirectory();
+        var store = dir.Create();
+        var endless = new EndlessStream();
+
+        var error = await Assert.ThrowsAsync<StoreException>(
+            () => store.ImportAsync(endless, new ExpectedContent { Size = 33 }, Token));
+
+        Assert.Equal(StoreError.ContentMismatch, error.Error);
+        Assert.True(endless.BytesRead < 1_000_000, $"{endless.BytesRead} bytes were read.");
+        Assert.Empty(dir.TempEntries());
+    }
+
+    [Fact]
+    public async Task A_freshly_imported_object_passes_fast_verification_without_rehashing()
+    {
+        using var dir = new TempStoreDirectory();
+        var store = dir.Create();
+        await store.ImportBytesAsync(Content, cancellationToken: Token);
+        var path = store.GetObjectPath(ContentSha1);
+        var time = File.GetLastWriteTimeUtc(path);
+
+        var sameLength = (byte[])Content.Clone();
+        sameLength[0] ^= 0xFF;
+        TempStoreDirectory.Tamper(path, sameLength);
+        File.SetAttributes(path, FileAttributes.Normal);
+        File.SetLastWriteTimeUtc(path, time);
+        File.SetAttributes(path, FileAttributes.ReadOnly);
+
+        // Valid means a record was found, so the file was not hashed.
+        Assert.Equal(ObjectState.Valid, await store.VerifyAsync(ContentSha1, VerifyMode.Fast, Token));
+    }
+
+    [Fact]
+    public async Task A_corrupt_object_held_open_without_delete_sharing_fails_with_object_in_use()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "Renaming an open file only fails on Windows.");
+        using var dir = new TempStoreDirectory();
+        var store = dir.Create();
+        await store.ImportBytesAsync(Content, cancellationToken: Token);
+        var path = store.GetObjectPath(ContentSha1);
+        TempStoreDirectory.Tamper(path, Encoding.UTF8.GetBytes("overwritten by a mod"));
+
+        await using (new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+        {
+            var error = await Assert.ThrowsAsync<StoreException>(() => store.ImportBytesAsync(Content, cancellationToken: Token));
+
+            Assert.Equal(StoreError.ObjectInUse, error.Error);
+        }
+    }
+
+    sealed class EndlessStream : Stream
+    {
+        public long BytesRead { get; private set; }
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position
+        {
+            get => throw new NotSupportedException();
+            set => throw new NotSupportedException();
+        }
+
+        public override int Read(byte[] buffer, int offset, int count)
+        {
+            BytesRead += count;
+            return count;
+        }
+
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            // Finite so that a missing limit fails the assertion instead of hanging the run.
+            if (BytesRead >= 20_000_000) return ValueTask.FromResult(0);
+            BytesRead += buffer.Length;
+            return ValueTask.FromResult(buffer.Length);
+        }
+
+        public override void Flush() { }
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    }
+
     /// <summary>Fails the test if anything tries to read it.</summary>
     sealed class UnreadableStream : Stream
     {

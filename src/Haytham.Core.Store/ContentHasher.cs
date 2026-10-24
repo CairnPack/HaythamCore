@@ -5,7 +5,10 @@ namespace Haytham.Core.Store;
 
 readonly record struct HashedContent(long Size, Sha1 Sha1, byte[]? Sha512);
 
-/// <summary>Reads a stream to the end, hashing it and optionally copying it, in one pass.</summary>
+/// <summary>
+/// Reads a stream to the end, hashing it and optionally copying it, in one pass. With an expected size it gives
+/// up as soon as the stream turns out longer, instead of reading an oversized or endless body to the end.
+/// </summary>
 static class ContentHasher
 {
     const int BufferSize = 81920;
@@ -14,7 +17,8 @@ static class ContentHasher
         Stream source,
         Stream? destination,
         bool includeSha512,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        long? expectedSize = null)
     {
         using var sha1 = IncrementalHash.CreateHash(HashAlgorithmName.SHA1);
         using var sha512 = includeSha512 ? IncrementalHash.CreateHash(HashAlgorithmName.SHA512) : null;
@@ -29,6 +33,10 @@ static class ContentHasher
                 sha512?.AppendData(buffer, 0, read);
                 if (destination is not null) await destination.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
                 size += read;
+                if (size > expectedSize)
+                    throw new StoreException(
+                        StoreError.ContentMismatch,
+                        $"The content does not match: it is longer than the expected {expectedSize} bytes.");
             }
 
             return new HashedContent(size, Sha1.FromBytes(sha1.GetHashAndReset()), sha512?.GetHashAndReset());

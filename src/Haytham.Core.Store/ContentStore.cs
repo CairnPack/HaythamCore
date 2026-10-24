@@ -24,8 +24,9 @@ public sealed class ContentStore
         StoreId = format.StoreId;
         Program = program;
         _readOnlyReason = ReadOnlyReason(format);
-        Verifier = new ObjectVerifier(layout, new VerificationRecords());
-        Importer = new ObjectImporter(layout, Verifier);
+        var records = new VerificationRecords();
+        Verifier = new ObjectVerifier(layout, records);
+        Importer = new ObjectImporter(layout, Verifier, records);
     }
 
     public string Root => Layout.Root;
