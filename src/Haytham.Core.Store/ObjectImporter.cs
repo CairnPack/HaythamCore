@@ -13,7 +13,7 @@ sealed class ObjectImporter(StoreLayout layout, ObjectVerifier verifier, Verific
     {
         var expectedSha512 = Validate(expected, nameof(expected));
         if (expected is not null
-            && await FindExistingAsync(expected, expectedSha512, cancellationToken) is { } existing)
+            && await FindExistingAsync(expected, expectedSha512, cancellationToken).ConfigureAwait(false) is { } existing)
             return existing;
 
         Directory.CreateDirectory(layout.TempDirectory);
@@ -21,27 +21,28 @@ sealed class ObjectImporter(StoreLayout layout, ObjectVerifier verifier, Verific
         try
         {
             HashedContent hashed;
-            await using (var stream = new FileStream(
+            var stream = new FileStream(
                 part,
                 FileMode.CreateNew,
                 FileAccess.Write,
                 FileShare.None,
                 bufferSize: 0,
-                FileOptions.Asynchronous))
+                FileOptions.Asynchronous);
+            await using (stream.ConfigureAwait(false))
             {
                 hashed = await ContentHasher.CopyAndHashAsync(
                     content,
                     stream,
                     includeSha512: expectedSha512 is not null,
                     cancellationToken,
-                    expected?.Size);
+                    expected?.Size).ConfigureAwait(false);
                 // Without this, a power cut after the move can leave an empty file under the object's name.
                 stream.Flush(flushToDisk: true);
             }
 
             CheckExpected(expected, expectedSha512, hashed);
             File.SetAttributes(part, File.GetAttributes(part) | FileAttributes.ReadOnly);
-            var outcome = await PublishAsync(part, hashed.Sha1, cancellationToken);
+            var outcome = await PublishAsync(part, hashed.Sha1, cancellationToken).ConfigureAwait(false);
             return new ImportResult(hashed.Sha1, hashed.Size, outcome);
         }
         finally
@@ -83,11 +84,11 @@ sealed class ObjectImporter(StoreLayout layout, ObjectVerifier verifier, Verific
         CancellationToken cancellationToken)
     {
         if (expected.Sha1 is not { } known
-            || await verifier.VerifyAsync(known, VerifyMode.Fast, cancellationToken) != ObjectState.Valid)
+            || await verifier.VerifyAsync(known, VerifyMode.Fast, cancellationToken).ConfigureAwait(false) != ObjectState.Valid)
             return null;
 
         var existing = new FileInfo(layout.ObjectPath(known));
-        if (await FindMismatchAsync(existing, expected, expectedSha512, cancellationToken) is { } detail)
+        if (await FindMismatchAsync(existing, expected, expectedSha512, cancellationToken).ConfigureAwait(false) is { } detail)
             throw Mismatch(detail);
         return new ImportResult(known, existing.Length, ImportOutcome.AlreadyPresent);
     }
@@ -105,14 +106,16 @@ sealed class ObjectImporter(StoreLayout layout, ObjectVerifier verifier, Verific
 
         try
         {
-            await using var stream = new FileStream(
+            var stream = new FileStream(
                 existing.FullName,
                 FileMode.Open,
                 FileAccess.Read,
                 FileShare.Read | FileShare.Delete,
                 bufferSize: 0,
                 FileOptions.Asynchronous | FileOptions.SequentialScan);
-            var hashed = await ContentHasher.CopyAndHashAsync(stream, null, includeSha512: true, cancellationToken);
+            await using var _ = stream.ConfigureAwait(false);
+            var hashed = await ContentHasher.CopyAndHashAsync(stream, null, includeSha512: true, cancellationToken)
+                .ConfigureAwait(false);
             return expectedSha512.AsSpan().SequenceEqual(hashed.Sha512)
                 ? null
                 : $"SHA-512 {Convert.ToHexStringLower(hashed.Sha512!)}, expected {expected.Sha512}";
@@ -140,7 +143,7 @@ sealed class ObjectImporter(StoreLayout layout, ObjectVerifier verifier, Verific
             catch (IOException) when (File.Exists(target))
             {
                 // Someone else's object, or an old one: only a full hash can tell whether to keep it.
-                switch (await verifier.VerifyAsync(sha1, VerifyMode.Full, cancellationToken))
+                switch (await verifier.VerifyAsync(sha1, VerifyMode.Full, cancellationToken).ConfigureAwait(false))
                 {
                     case ObjectState.Valid:
                         return ImportOutcome.AlreadyPresent;

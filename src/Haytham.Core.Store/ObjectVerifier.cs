@@ -39,14 +39,16 @@ sealed class ObjectVerifier(StoreLayout layout, VerificationRecords records)
         try
         {
             // Share delete so that a concurrent import can move a corrupt object aside while it is being read.
-            await using var stream = new FileStream(
+            var stream = new FileStream(
                 file.FullName,
                 FileMode.Open,
                 FileAccess.Read,
                 FileShare.Read | FileShare.Delete,
                 bufferSize: 0,
                 FileOptions.Asynchronous | FileOptions.SequentialScan);
-            hashed = await ContentHasher.CopyAndHashAsync(stream, null, includeSha512: false, cancellationToken);
+            await using var _ = stream.ConfigureAwait(false);
+            hashed = await ContentHasher.CopyAndHashAsync(stream, null, includeSha512: false, cancellationToken)
+                .ConfigureAwait(false);
         }
         catch (FileNotFoundException)
         {

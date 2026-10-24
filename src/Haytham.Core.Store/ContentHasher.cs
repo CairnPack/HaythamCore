@@ -27,11 +27,11 @@ static class ContentHasher
         {
             long size = 0;
             int read;
-            while ((read = await source.ReadAsync(buffer.AsMemory(0, BufferSize), cancellationToken)) > 0)
+            while ((read = await source.ReadAsync(buffer.AsMemory(0, BufferSize), cancellationToken).ConfigureAwait(false)) > 0)
             {
                 sha1.AppendData(buffer, 0, read);
                 sha512?.AppendData(buffer, 0, read);
-                if (destination is not null) await destination.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
+                if (destination is not null) await destination.WriteAsync(buffer.AsMemory(0, read), cancellationToken).ConfigureAwait(false);
                 size += read;
                 if (size > expectedSize)
                     throw new StoreException(

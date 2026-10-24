@@ -31,7 +31,7 @@ sealed class IdleTimeoutStream(Stream inner, TimeSpan timeout, TimeProvider time
 
     public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
     {
-        if (timeout == Timeout.InfiniteTimeSpan) return await inner.ReadAsync(buffer, cancellationToken);
+        if (timeout == Timeout.InfiniteTimeSpan) return await inner.ReadAsync(buffer, cancellationToken).ConfigureAwait(false);
 
         // CancelAfter would use the system clock: only the constructor takes a TimeProvider, so the caller's token
         // is linked in separately.
@@ -39,7 +39,7 @@ sealed class IdleTimeoutStream(Stream inner, TimeSpan timeout, TimeProvider time
         using var read = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, idle.Token);
         try
         {
-            return await inner.ReadAsync(buffer, read.Token);
+            return await inner.ReadAsync(buffer, read.Token).ConfigureAwait(false);
         }
         catch (Exception e) when (idle.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
         {
@@ -74,7 +74,7 @@ sealed class IdleTimeoutStream(Stream inner, TimeSpan timeout, TimeProvider time
 
     public override async ValueTask DisposeAsync()
     {
-        await inner.DisposeAsync();
-        await base.DisposeAsync();
+        await inner.DisposeAsync().ConfigureAwait(false);
+        await base.DisposeAsync().ConfigureAwait(false);
     }
 }

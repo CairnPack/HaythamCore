@@ -73,7 +73,7 @@ public sealed class ObjectDownloader
 
         // A stored object that misses the expected size or SHA-512 fails here as an import would: under the same
         // SHA-1, no download can bring other content.
-        if (await _store.Importer.FindExistingAsync(expected, expectedSha512, cancellationToken) is { } existing)
+        if (await _store.Importer.FindExistingAsync(expected, expectedSha512, cancellationToken).ConfigureAwait(false) is { } existing)
             return Present(existing);
 
         // Held across retries and Retry-After waits: whoever waits for this lock wants this very object.
@@ -83,16 +83,16 @@ public sealed class ObjectDownloader
             $"download {sha1}",
             _options.LockTimeout,
             _timeProvider,
-            cancellationToken);
+            cancellationToken).ConfigureAwait(false);
 
         // Whoever held the lock before may have just downloaded it.
-        if (await _store.Importer.FindExistingAsync(expected, expectedSha512, cancellationToken) is { } downloaded)
+        if (await _store.Importer.FindExistingAsync(expected, expectedSha512, cancellationToken).ConfigureAwait(false) is { } downloaded)
             return Present(downloaded);
 
         var failures = new List<string>();
         foreach (var url in request.Urls)
         {
-            var imported = await TryUrlAsync(url, expected, failures, cancellationToken);
+            var imported = await TryUrlAsync(url, expected, failures, cancellationToken).ConfigureAwait(false);
             if (imported is not null) return new ObtainResult(imported.Sha1, imported.Size, imported.Outcome, url);
         }
 
@@ -111,7 +111,7 @@ public sealed class ObjectDownloader
             string failure;
             TimeSpan wait;
             var waitSource = "backoff";
-            await _requests.WaitAsync(cancellationToken);
+            await _requests.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
             {
                 using var message = new HttpRequestMessage(HttpMethod.Get, url);
@@ -119,7 +119,7 @@ public sealed class ObjectDownloader
                 using var response = await _http.SendAsync(
                     message,
                     HttpCompletionOption.ResponseHeadersRead,
-                    cancellationToken);
+                    cancellationToken).ConfigureAwait(false);
 
                 if (response.IsSuccessStatusCode)
                 {
@@ -132,11 +132,12 @@ public sealed class ObjectDownloader
                         return null;
                     }
 
-                    await using var body = new IdleTimeoutStream(
-                        await response.Content.ReadAsStreamAsync(cancellationToken),
+                    var body = new IdleTimeoutStream(
+                        await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false),
                         _options.ReadIdleTimeout,
                         _timeProvider);
-                    return await _store.Importer.ImportAsync(body, expected, cancellationToken);
+                    await using var _ = body.ConfigureAwait(false);
+                    return await _store.Importer.ImportAsync(body, expected, cancellationToken).ConfigureAwait(false);
                 }
 
                 var status = (int)response.StatusCode;
@@ -189,7 +190,7 @@ public sealed class ObjectDownloader
                 return null;
             }
 
-            await Task.Delay(wait, _timeProvider, cancellationToken);
+            await Task.Delay(wait, _timeProvider, cancellationToken).ConfigureAwait(false);
         }
     }
 

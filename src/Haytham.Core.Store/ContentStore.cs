@@ -108,14 +108,15 @@ public sealed class ContentStore
         CancellationToken cancellationToken = default)
     {
         ThrowIfReadOnly();
-        await using var stream = new FileStream(
+        var stream = new FileStream(
             path,
             FileMode.Open,
             FileAccess.Read,
             FileShare.Read,
             bufferSize: 0,
             FileOptions.Asynchronous | FileOptions.SequentialScan);
-        return await Importer.ImportAsync(stream, expected, cancellationToken);
+        await using var _ = stream.ConfigureAwait(false);
+        return await Importer.ImportAsync(stream, expected, cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<ImportResult> ImportBytesAsync(
@@ -125,7 +126,7 @@ public sealed class ContentStore
     {
         ThrowIfReadOnly();
         using var stream = new MemoryStream(content, writable: false);
-        return await Importer.ImportAsync(stream, expected, cancellationToken);
+        return await Importer.ImportAsync(stream, expected, cancellationToken).ConfigureAwait(false);
     }
 
     internal void ThrowIfReadOnly()

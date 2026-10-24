@@ -53,7 +53,7 @@ sealed class FileLock : IDisposable
                         StoreError.LockTimeout,
                         $"Waited {timeout} for the lock '{path}' to {operation}; it is held by {LockHolders.Describe(path)}.",
                         e);
-                await Task.Delay(Min(backoff, timeout - elapsed), timeProvider, cancellationToken);
+                await Task.Delay(Min(backoff, timeout - elapsed), timeProvider, cancellationToken).ConfigureAwait(false);
                 backoff = Min(backoff * 2, MaxBackoff);
                 continue;
             }
