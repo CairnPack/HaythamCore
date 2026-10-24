@@ -63,7 +63,7 @@ Status: implemented
 
 参数错误要在拿锁、联网之前报出来，否则要等某个 URL 回 200 才暴露；所有 URL 都 404 时会被 `DownloadFailed` 掩盖，对象已经在仓库里时完全不报。
 
-- 构造函数：`UserAgent` 用 `HttpHeaders.TryParseAdd` 试解析一次（例如 `name/1.0 contact@x.com` 不合法，联系方式要放进括号）；`RetryDelay`、`MaxRetryAfter` 不能是负数；`MaxRetryAfter` 与 `ReadIdleTimeout` 不能超过 `int.MaxValue` 毫秒（约 24.8 天），因为 `Task.Delay` 与 `CancelAfter` 不接受更长的计时；`ReadIdleTimeout` 还必须大于零，或者是 `Timeout.InfiniteTimeSpan`。
+- 构造函数：`UserAgent` 用 `request.Headers.UserAgent.TryParseAdd`（`HttpHeaderValueCollection<T>.TryParseAdd`） 试解析一次（例如 `name/1.0 contact@x.com` 不合法，联系方式要放进括号）；`RetryDelay`、`MaxRetryAfter` 不能是负数；`MaxRetryAfter` 与 `ReadIdleTimeout` 不能超过 `int.MaxValue` 毫秒（约 24.8 天），因为 `Task.Delay` 与 `CancelAfter` 不接受更长的计时；`ReadIdleTimeout` 还必须大于零，或者是 `Timeout.InfiniteTimeSpan`。
 - `ObtainAsync`：见流程第 1 步。SHA-512 的格式规则和纳入时 `ObjectImporter.ParseSha512` 的一样（长度 128，大小写都接受）。
 
 ### 跨进程锁
