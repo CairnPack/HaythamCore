@@ -6,10 +6,12 @@ public class FileLockTests
 {
     static readonly ProgramInfo Program = new("store-tests", "1.0");
 
+    readonly TestClock _clock = new();
+
     static CancellationToken Token => TestContext.Current.CancellationToken;
 
-    static Task<FileLock> Acquire(string path, TimeSpan timeout) =>
-        FileLock.AcquireExclusiveAsync(path, Program, "test", timeout, Task.Delay, Token);
+    Task<FileLock> Acquire(string path, TimeSpan timeout) =>
+        FileLock.AcquireExclusiveAsync(path, Program, "test", timeout, _clock, Token);
 
     [Fact]
     public async Task A_second_handle_in_the_same_process_waits_and_times_out_naming_the_holder()
@@ -19,10 +21,16 @@ public class FileLockTests
 
         using (await Acquire(path, TimeSpan.FromSeconds(1)))
         {
-            var error = await Assert.ThrowsAsync<StoreException>(() => Acquire(path, TimeSpan.FromMilliseconds(200)));
+            var waiting = Acquire(path, TimeSpan.FromMilliseconds(200));
+            await _clock.AdvancePastNextTimerAsync(TimeSpan.FromMilliseconds(50));
+            await _clock.AdvancePastNextTimerAsync(TimeSpan.FromMilliseconds(100));
+            await _clock.AdvancePastNextTimerAsync(TimeSpan.FromMilliseconds(50));
+            var error = await Assert.ThrowsAsync<StoreException>(() => waiting);
 
             Assert.Equal(StoreError.LockTimeout, error.Error);
             Assert.Contains($"store-tests 1.0 (PID {Environment.ProcessId})", error.Message);
+            // The holder record is dated by the same clock.
+            Assert.Contains($"since {_clock.Start:u}", error.Message);
         }
 
         using var again = await Acquire(path, TimeSpan.FromSeconds(1));
@@ -71,9 +79,12 @@ public class FileLockTests
         using var dir = new TempStoreDirectory();
         var path = Path.Combine(dir.Path, "locks", "download", "abc");
         using var held = await Acquire(path, TimeSpan.FromSeconds(1));
-        using var cancel = new CancellationTokenSource(TimeSpan.FromMilliseconds(100));
+        using var cancel = CancellationTokenSource.CreateLinkedTokenSource(Token);
 
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(
-            () => FileLock.AcquireExclusiveAsync(path, Program, "test", TimeSpan.FromMinutes(1), Task.Delay, cancel.Token));
+        var waiting = FileLock.AcquireExclusiveAsync(path, Program, "test", TimeSpan.FromMinutes(1), _clock, cancel.Token);
+        Assert.Equal(TimeSpan.FromMilliseconds(50), await _clock.NextTimerAsync());
+        await cancel.CancelAsync();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => waiting);
     }
 }

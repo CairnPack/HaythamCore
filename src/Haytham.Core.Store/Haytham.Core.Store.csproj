@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <ItemGroup>
-    <!-- Tests replace the downloader's delays and take file locks directly. -->
+    <!-- Tests take file locks directly and ask the importer about stored objects. -->
     <InternalsVisibleTo Include="Haytham.Core.Store.Tests" />
   </ItemGroup>
 

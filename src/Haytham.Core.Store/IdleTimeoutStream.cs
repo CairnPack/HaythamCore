@@ -5,14 +5,15 @@ namespace Haytham.Core.Store;
 /// <summary>
 /// Wraps a response body so that a read which gets no data for <c>timeout</c> fails with a
 /// <see cref="TimeoutException"/>. The timer starts anew for every read, so a slow but steady body never times out,
-/// and the time the reader spends between reads (hashing, writing to disk) does not count.
+/// and the time the reader spends between reads (hashing, writing to disk) does not count. The timer runs on
+/// <c>timeProvider</c>; <see cref="Timeout.InfiniteTimeSpan"/> turns it off.
 /// </summary>
 /// <remarks>
 /// The caller's own cancellation always wins: when its token is cancelled the read throws
 /// <see cref="OperationCanceledException"/> as usual, even if the idle timer fired too. Only the asynchronous reads
 /// are timed; the synchronous <see cref="Read(byte[], int, int)"/> passes straight through.
 /// </remarks>
-sealed class IdleTimeoutStream(Stream inner, TimeSpan timeout) : Stream
+sealed class IdleTimeoutStream(Stream inner, TimeSpan timeout, TimeProvider timeProvider) : Stream
 {
     public override bool CanRead => inner.CanRead;
 
@@ -30,11 +31,15 @@ sealed class IdleTimeoutStream(Stream inner, TimeSpan timeout) : Stream
 
     public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
     {
-        using var idle = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        idle.CancelAfter(timeout);
+        if (timeout == Timeout.InfiniteTimeSpan) return await inner.ReadAsync(buffer, cancellationToken);
+
+        // CancelAfter would use the system clock: only the constructor takes a TimeProvider, so the caller's token
+        // is linked in separately.
+        using var idle = new CancellationTokenSource(timeout, timeProvider);
+        using var read = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, idle.Token);
         try
         {
-            return await inner.ReadAsync(buffer, idle.Token);
+            return await inner.ReadAsync(buffer, read.Token);
         }
         catch (Exception e) when (idle.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
         {

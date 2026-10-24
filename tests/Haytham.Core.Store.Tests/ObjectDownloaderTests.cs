@@ -14,24 +14,33 @@ public sealed class ObjectDownloaderTests : IDisposable
 
     static readonly Sha1 BodySha1 = Sha1.FromBytes(SHA1.HashData(Encoding.UTF8.GetBytes(Body)));
 
+    /// <summary>
+    /// The read idle timeout is off, so every timer the downloader starts is a wait (backoff, <c>Retry-After</c>,
+    /// lock queueing). Tests about the idle timeout turn it on.
+    /// </summary>
+    static readonly DownloadOptions Options = new()
+    {
+        UserAgent = "store-tests/1.0",
+        ReadIdleTimeout = Timeout.InfiniteTimeSpan,
+    };
+
     readonly TempStoreDirectory _dir = new();
     readonly FakeHttpHandler _http = new();
-    readonly List<TimeSpan> _delays = [];
-    readonly TaskCompletionSource _firstWait = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    readonly TestClock _clock = new();
 
     static CancellationToken Token => TestContext.Current.CancellationToken;
 
     ObjectDownloader Downloader(ContentStore store, DownloadOptions? options = null) =>
-        new(
-            store,
-            new HttpClient(_http),
-            options ?? new DownloadOptions { UserAgent = "store-tests/1.0" },
-            async (wait, cancellationToken) =>
-            {
-                lock (_delays) _delays.Add(wait);
-                _firstWait.TrySetResult();
-                await Task.Delay(1, cancellationToken);
-            });
+        new(store, new HttpClient(_http), options ?? Options, _clock);
+
+    Task<FileLock> HoldDownloadLock(ContentStore store, ProgramInfo holder) =>
+        FileLock.AcquireExclusiveAsync(
+            store.Layout.DownloadLockPath(BodySha1),
+            holder,
+            $"download {BodySha1}",
+            TimeSpan.FromSeconds(1),
+            _clock,
+            Token);
 
     static ObtainRequest Request(params string[] urls) =>
         new() { Sha1 = BodySha1, Urls = [.. urls.Select(u => new Uri(u))] };
@@ -147,11 +156,13 @@ public sealed class ObjectDownloaderTests : IDisposable
             .Respond(Modrinth, HttpStatusCode.BadGateway)
             .Respond(Modrinth, HttpStatusCode.OK, Body);
 
-        var result = await Downloader(store).ObtainAsync(Request(Modrinth), Token);
+        var obtain = Downloader(store).ObtainAsync(Request(Modrinth), Token);
+        await _clock.AdvancePastNextTimerAsync(TimeSpan.FromSeconds(1));
+        await _clock.AdvancePastNextTimerAsync(TimeSpan.FromSeconds(2));
+        var result = await obtain;
 
         Assert.Equal(ImportOutcome.Added, result.Outcome);
         Assert.Equal(3, _http.Requests.Count);
-        Assert.Equal([TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(2)], _delays);
     }
 
     [Fact]
@@ -161,9 +172,26 @@ public sealed class ObjectDownloaderTests : IDisposable
         _http.Respond(HttpMethod.Get, Modrinth, TooManyRequests(new RetryConditionHeaderValue(TimeSpan.FromSeconds(5))))
             .Respond(Modrinth, HttpStatusCode.OK, Body);
 
-        await Downloader(store).ObtainAsync(Request(Modrinth), Token);
+        var obtain = Downloader(store).ObtainAsync(Request(Modrinth), Token);
+        await _clock.AdvancePastNextTimerAsync(TimeSpan.FromSeconds(5));
+        await obtain;
 
-        Assert.Equal([TimeSpan.FromSeconds(5)], _delays);
+        Assert.Equal(2, _http.Requests.Count);
+    }
+
+    [Fact]
+    public async Task A_retry_after_date_is_counted_from_the_clocks_now()
+    {
+        var store = _dir.Create();
+        var date = _clock.GetUtcNow() + TimeSpan.FromSeconds(7);
+        _http.Respond(HttpMethod.Get, Modrinth, TooManyRequests(new RetryConditionHeaderValue(date)))
+            .Respond(Modrinth, HttpStatusCode.OK, Body);
+
+        var obtain = Downloader(store).ObtainAsync(Request(Modrinth), Token);
+        await _clock.AdvancePastNextTimerAsync(TimeSpan.FromSeconds(7));
+        await obtain;
+
+        Assert.Equal(2, _http.Requests.Count);
     }
 
     [Fact]
@@ -176,7 +204,7 @@ public sealed class ObjectDownloaderTests : IDisposable
         var result = await Downloader(store).ObtainAsync(Request(Modrinth, CurseForge), Token);
 
         Assert.Equal(new Uri(CurseForge), result.Source);
-        Assert.Empty(_delays);
+        Assert.Empty(_clock.Timers);
     }
 
     [Fact]
@@ -189,7 +217,7 @@ public sealed class ObjectDownloaderTests : IDisposable
 
         Assert.Equal(new Uri(CurseForge), result.Source);
         Assert.Equal(1, _http.Requests.Count(r => r.Url == new Uri(Modrinth)));
-        Assert.Empty(_delays);
+        Assert.Empty(_clock.Timers);
     }
 
     [Fact]
@@ -212,8 +240,10 @@ public sealed class ObjectDownloaderTests : IDisposable
         _http.Fail(Modrinth, new HttpRequestException("connection reset"))
             .Respond(CurseForge, HttpStatusCode.Forbidden);
 
-        var error = await Assert.ThrowsAsync<StoreException>(
-            () => Downloader(store).ObtainAsync(Request(Modrinth, CurseForge), Token));
+        var obtain = Downloader(store).ObtainAsync(Request(Modrinth, CurseForge), Token);
+        await _clock.AdvancePastNextTimerAsync(TimeSpan.FromSeconds(1));
+        await _clock.AdvancePastNextTimerAsync(TimeSpan.FromSeconds(2));
+        var error = await Assert.ThrowsAsync<StoreException>(() => obtain);
 
         Assert.Equal(StoreError.DownloadFailed, error.Error);
         Assert.Contains($"{Modrinth}: connection reset after 3 attempts", error.Message);
@@ -223,54 +253,57 @@ public sealed class ObjectDownloaderTests : IDisposable
         Assert.Empty(_dir.TempEntries());
     }
 
-    [Fact(Timeout = 10_000)]
+    [Fact]
     public async Task A_body_that_stops_sending_data_times_out_and_is_retried()
     {
         var store = _dir.Create();
         _http.Respond(HttpMethod.Get, Modrinth, Streamed(Stalled())).Respond(Modrinth, HttpStatusCode.OK, Body);
-        var options = new DownloadOptions { UserAgent = "store-tests/1.0", ReadIdleTimeout = TimeSpan.FromMilliseconds(100) };
+        var options = Options with { ReadIdleTimeout = TimeSpan.FromSeconds(30) };
 
-        var result = await Downloader(store, options).ObtainAsync(Request(Modrinth), TestContext.Current.CancellationToken);
+        var obtain = Downloader(store, options).ObtainAsync(Request(Modrinth), Token);
+        await _clock.AdvancePastNextTimerAsync(TimeSpan.FromSeconds(30));
+        await _clock.AdvancePastNextTimerAsync(TimeSpan.FromSeconds(1));
+        var result = await obtain;
 
         Assert.Equal(ImportOutcome.Added, result.Outcome);
         Assert.Equal(2, _http.Requests.Count);
-        Assert.Equal([TimeSpan.FromSeconds(1)], _delays);
         Assert.Empty(_dir.TempEntries());
     }
 
-    [Fact(Timeout = 10_000)]
+    [Fact]
     public async Task A_body_that_keeps_stalling_is_reported_as_an_idle_timeout()
     {
         var store = _dir.Create();
         _http.Respond(HttpMethod.Get, Modrinth, (request, cancellationToken) => Streamed(Stalled())(request, cancellationToken));
-        var options = new DownloadOptions
-        {
-            UserAgent = "store-tests/1.0",
-            MaxAttemptsPerUrl = 2,
-            ReadIdleTimeout = TimeSpan.FromMilliseconds(100),
-        };
+        var options = Options with { MaxAttemptsPerUrl = 2, ReadIdleTimeout = TimeSpan.FromSeconds(30) };
 
-        var error = await Assert.ThrowsAsync<StoreException>(
-            () => Downloader(store, options).ObtainAsync(Request(Modrinth), TestContext.Current.CancellationToken));
+        var obtain = Downloader(store, options).ObtainAsync(Request(Modrinth), Token);
+        await _clock.AdvancePastNextTimerAsync(TimeSpan.FromSeconds(30));
+        await _clock.AdvancePastNextTimerAsync(TimeSpan.FromSeconds(1));
+        await _clock.AdvancePastNextTimerAsync(TimeSpan.FromSeconds(30));
+        var error = await Assert.ThrowsAsync<StoreException>(() => obtain);
 
         Assert.Equal(StoreError.DownloadFailed, error.Error);
-        Assert.Contains("No data received for 0.1s", error.Message);
+        Assert.Contains("No data received for 30s", error.Message);
         Assert.Contains("after 2 attempts", error.Message);
     }
 
-    [Fact(Timeout = 10_000)]
+    [Fact]
     public async Task Cancelling_while_the_body_is_stalled_throws_and_is_not_retried()
     {
         var store = _dir.Create();
         _http.Respond(HttpMethod.Get, Modrinth, Streamed(Stalled()));
-        using var cancel = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
-        cancel.CancelAfter(TimeSpan.FromMilliseconds(100));
+        var options = Options with { ReadIdleTimeout = TimeSpan.FromSeconds(30) };
+        using var cancel = CancellationTokenSource.CreateLinkedTokenSource(Token);
 
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(
-            () => Downloader(store).ObtainAsync(Request(Modrinth), cancel.Token));
+        var obtain = Downloader(store, options).ObtainAsync(Request(Modrinth), cancel.Token);
+        // The idle timer has started, so the body is being read; it never fires because the clock stays put.
+        Assert.Equal(TimeSpan.FromSeconds(30), await _clock.NextTimerAsync());
+        await cancel.CancelAsync();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => obtain);
 
         Assert.Single(_http.Requests);
-        Assert.Empty(_delays);
+        Assert.Equal([TimeSpan.FromSeconds(30)], _clock.Timers);
         Assert.Empty(_dir.TempEntries());
     }
 
@@ -283,11 +316,12 @@ public sealed class ObjectDownloaderTests : IDisposable
             _ => Task.FromException<int>(new HttpIOException(HttpRequestError.ResponseEnded, "connection reset mid-body")));
         _http.Respond(HttpMethod.Get, Modrinth, Streamed(broken)).Respond(Modrinth, HttpStatusCode.OK, Body);
 
-        var result = await Downloader(store).ObtainAsync(Request(Modrinth), Token);
+        var obtain = Downloader(store).ObtainAsync(Request(Modrinth), Token);
+        await _clock.AdvancePastNextTimerAsync(TimeSpan.FromSeconds(1));
+        var result = await obtain;
 
         Assert.Equal(ImportOutcome.Added, result.Outcome);
         Assert.Equal(2, _http.Requests.Count);
-        Assert.Equal([TimeSpan.FromSeconds(1)], _delays);
         Assert.Empty(_dir.TempEntries());
     }
 
@@ -335,15 +369,16 @@ public sealed class ObjectDownloaderTests : IDisposable
     {
         var store = _dir.Create();
         _http.Respond(Modrinth, HttpStatusCode.ServiceUnavailable);
-        var options = new DownloadOptions { UserAgent = "store-tests/1.0", RetryDelay = TimeSpan.FromSeconds(40) };
+        var options = Options with { RetryDelay = TimeSpan.FromSeconds(40) };
 
-        var error = await Assert.ThrowsAsync<StoreException>(
-            () => Downloader(store, options).ObtainAsync(Request(Modrinth), Token));
+        var obtain = Downloader(store, options).ObtainAsync(Request(Modrinth), Token);
+        await _clock.AdvancePastNextTimerAsync(TimeSpan.FromSeconds(40));
+        var error = await Assert.ThrowsAsync<StoreException>(() => obtain);
 
         Assert.Contains($"{Modrinth}: HTTP 503, backoff 80s is above the 60s limit", error.Message);
         Assert.DoesNotContain("Retry-After", error.Message);
         Assert.Equal(2, _http.Requests.Count);
-        Assert.Equal([TimeSpan.FromSeconds(40)], _delays);
+        Assert.Equal([TimeSpan.FromSeconds(40)], _clock.Timers);
     }
 
     [Fact]
@@ -351,14 +386,15 @@ public sealed class ObjectDownloaderTests : IDisposable
     {
         var store = _dir.Create();
         _http.Fail(Modrinth, new HttpRequestException("connection reset"));
-        var options = new DownloadOptions { UserAgent = "store-tests/1.0", RetryDelay = TimeSpan.FromSeconds(40) };
+        var options = Options with { RetryDelay = TimeSpan.FromSeconds(40) };
 
-        var error = await Assert.ThrowsAsync<StoreException>(
-            () => Downloader(store, options).ObtainAsync(Request(Modrinth), Token));
+        var obtain = Downloader(store, options).ObtainAsync(Request(Modrinth), Token);
+        await _clock.AdvancePastNextTimerAsync(TimeSpan.FromSeconds(40));
+        var error = await Assert.ThrowsAsync<StoreException>(() => obtain);
 
         Assert.Contains($"{Modrinth}: connection reset, backoff 80s is above the 60s limit", error.Message);
         Assert.Equal(2, _http.Requests.Count);
-        Assert.Equal([TimeSpan.FromSeconds(40)], _delays);
+        Assert.Equal([TimeSpan.FromSeconds(40)], _clock.Timers);
     }
 
     [Fact]
@@ -369,7 +405,7 @@ public sealed class ObjectDownloaderTests : IDisposable
         for (var i = 0; i < 63; i++)
             _http.Respond(HttpMethod.Get, Modrinth, TooManyRequests(new RetryConditionHeaderValue(TimeSpan.Zero)));
         _http.Respond(Modrinth, HttpStatusCode.ServiceUnavailable);
-        var options = new DownloadOptions { UserAgent = "store-tests/1.0", MaxAttemptsPerUrl = 64 };
+        var options = Options with { MaxAttemptsPerUrl = 64 };
 
         var error = await Assert.ThrowsAsync<StoreException>(
             () => Downloader(store, options).ObtainAsync(Request(Modrinth), Token));
@@ -390,7 +426,7 @@ public sealed class ObjectDownloaderTests : IDisposable
 
         Assert.Equal(new Uri(CurseForge), result.Source);
         Assert.Equal(1, _http.Requests.Count(r => r.Url == new Uri(Modrinth)));
-        Assert.Empty(_delays);
+        Assert.Empty(_clock.Timers);
         Assert.Empty(_dir.TempEntries());
     }
 
@@ -398,17 +434,15 @@ public sealed class ObjectDownloaderTests : IDisposable
     public async Task Waits_for_the_download_lock_and_times_out_naming_the_holder()
     {
         var store = _dir.Create();
-        using var held = await FileLock.AcquireExclusiveAsync(
-            store.Layout.DownloadLockPath(BodySha1),
-            new ProgramInfo("other-launcher", "2.0"),
-            $"download {BodySha1}",
-            TimeSpan.FromSeconds(1),
-            Task.Delay,
-            Token);
-        var options = new DownloadOptions { UserAgent = "store-tests/1.0", LockTimeout = TimeSpan.FromMilliseconds(200) };
+        using var held = await HoldDownloadLock(store, new ProgramInfo("other-launcher", "2.0"));
+        var options = Options with { LockTimeout = TimeSpan.FromMilliseconds(200) };
 
-        var error = await Assert.ThrowsAsync<StoreException>(
-            () => Downloader(store, options).ObtainAsync(Request(Modrinth), Token));
+        var obtain = Downloader(store, options).ObtainAsync(Request(Modrinth), Token);
+        // Backoff doubles from 50 ms; the last wait is cut short to end at the timeout.
+        await _clock.AdvancePastNextTimerAsync(TimeSpan.FromMilliseconds(50));
+        await _clock.AdvancePastNextTimerAsync(TimeSpan.FromMilliseconds(100));
+        await _clock.AdvancePastNextTimerAsync(TimeSpan.FromMilliseconds(50));
+        var error = await Assert.ThrowsAsync<StoreException>(() => obtain);
 
         Assert.Equal(StoreError.LockTimeout, error.Error);
         Assert.Contains("other-launcher 2.0", error.Message);
@@ -419,17 +453,13 @@ public sealed class ObjectDownloaderTests : IDisposable
     public async Task A_waiter_finds_the_object_the_lock_holder_downloaded_and_does_not_download_again()
     {
         var store = _dir.Create();
-        var held = await FileLock.AcquireExclusiveAsync(
-            store.Layout.DownloadLockPath(BodySha1),
-            ProgramInfo.Unknown,
-            "download",
-            TimeSpan.FromSeconds(1),
-            Task.Delay,
-            Token);
+        var held = await HoldDownloadLock(store, ProgramInfo.Unknown);
 
         var waiting = Downloader(store).ObtainAsync(Request(Modrinth), Token);
+        Assert.Equal(TimeSpan.FromMilliseconds(50), await _clock.NextTimerAsync());
         await store.ImportBytesAsync(Encoding.UTF8.GetBytes(Body), cancellationToken: Token);
         held.Dispose();
+        _clock.Advance(TimeSpan.FromMilliseconds(50));
         var result = await waiting;
 
         Assert.Equal(ImportOutcome.AlreadyPresent, result.Outcome);
@@ -441,18 +471,14 @@ public sealed class ObjectDownloaderTests : IDisposable
     {
         var store = _dir.Create();
         _http.Respond(Modrinth, HttpStatusCode.OK, Body);
-        var held = await FileLock.AcquireExclusiveAsync(
-            store.Layout.DownloadLockPath(BodySha1),
-            ProgramInfo.Unknown,
-            "download",
-            TimeSpan.FromSeconds(1),
-            Task.Delay,
-            Token);
+        var held = await HoldDownloadLock(store, ProgramInfo.Unknown);
 
         var waiting = Downloader(store).ObtainAsync(Request(Modrinth) with { Size = Body.Length + 1 }, Token);
-        await _firstWait.Task;
+        // The first backoff shows the waiter has already looked in the store and is queueing for the lock.
+        Assert.Equal(TimeSpan.FromMilliseconds(50), await _clock.NextTimerAsync());
         await store.ImportBytesAsync(Encoding.UTF8.GetBytes(Body), cancellationToken: Token);
         held.Dispose();
+        _clock.Advance(TimeSpan.FromMilliseconds(50));
         var error = await Assert.ThrowsAsync<StoreException>(() => waiting);
 
         Assert.Equal(StoreError.ContentMismatch, error.Error);
@@ -468,7 +494,9 @@ public sealed class ObjectDownloaderTests : IDisposable
             await Task.Delay(50, cancellationToken);
             return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(Body) };
         });
-        var downloader = Downloader(store);
+        // The real clock: how often the three waiters retry the lock while the holder writes to disk depends on the
+        // machine, so there is no fixed sequence of timers for the test to step through.
+        var downloader = new ObjectDownloader(store, new HttpClient(_http), Options, TimeProvider.System);
 
         var results = await Task.WhenAll(
             Enumerable.Range(0, 4).Select(_ => Task.Run(() => downloader.ObtainAsync(Request(Modrinth), Token))));

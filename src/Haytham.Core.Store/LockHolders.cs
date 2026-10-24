@@ -34,7 +34,8 @@ static class LockHolders
     /// Records the current process as a holder and removes records of processes that have ended. Returns the record
     /// path, or <see langword="null"/> when it could not be written: a missing record never fails the lock.
     /// </summary>
-    public static string? Register(string lockPath, ProgramInfo program, string operation)
+    /// <param name="since">When the lock was taken, shown to whoever waits for it.</param>
+    public static string? Register(string lockPath, ProgramInfo program, string operation, DateTimeOffset since)
     {
         var directory = DirectoryOf(lockPath);
         var self = ProcessIdentity.Current;
@@ -47,7 +48,7 @@ static class LockHolders
             Pid = self.Pid,
             StartTime = self.StartTime,
             Operation = operation,
-            Since = DateTimeOffset.UtcNow,
+            Since = since,
         };
 
         try

@@ -1,5 +1,3 @@
-using System.Diagnostics;
-
 namespace Haytham.Core.Store;
 
 /// <summary>
@@ -27,16 +25,17 @@ sealed class FileLock : IDisposable
     /// Waits for the exclusive lock, backing off from 50 ms up to 1 s between tries. Fails with
     /// <see cref="StoreError.LockTimeout"/>, naming the holders, once <paramref name="timeout"/> has passed.
     /// </summary>
+    /// <param name="timeProvider">Measures the wait, runs the backoff, and dates the holder record.</param>
     public static async Task<FileLock> AcquireExclusiveAsync(
         string path,
         ProgramInfo program,
         string operation,
         TimeSpan timeout,
-        Func<TimeSpan, CancellationToken, Task> delay,
+        TimeProvider timeProvider,
         CancellationToken cancellationToken)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-        var started = Stopwatch.GetTimestamp();
+        var started = timeProvider.GetTimestamp();
         var backoff = FirstBackoff;
         while (true)
         {
@@ -48,18 +47,18 @@ sealed class FileLock : IDisposable
             }
             catch (IOException e) when (IsHeldByOther(e))
             {
-                var elapsed = Stopwatch.GetElapsedTime(started);
+                var elapsed = timeProvider.GetElapsedTime(started);
                 if (elapsed >= timeout)
                     throw new StoreException(
                         StoreError.LockTimeout,
                         $"Waited {timeout} for the lock '{path}' to {operation}; it is held by {LockHolders.Describe(path)}.",
                         e);
-                await delay(Min(backoff, timeout - elapsed), cancellationToken);
+                await Task.Delay(Min(backoff, timeout - elapsed), timeProvider, cancellationToken);
                 backoff = Min(backoff * 2, MaxBackoff);
                 continue;
             }
 
-            return new FileLock(handle, LockHolders.Register(path, program, operation));
+            return new FileLock(handle, LockHolders.Register(path, program, operation, timeProvider.GetUtcNow()));
         }
     }
 

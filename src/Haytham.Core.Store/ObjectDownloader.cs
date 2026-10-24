@@ -11,31 +11,29 @@ namespace Haytham.Core.Store;
 /// </summary>
 public sealed class ObjectDownloader
 {
-    /// <summary>The longest single wait or timer: <see cref="Task.Delay(TimeSpan)"/> and
-    /// <see cref="CancellationTokenSource.CancelAfter(TimeSpan)"/> refuse longer ones.</summary>
+    /// <summary>The longest single wait or timer, about 24.8 days, which stays inside what
+    /// <see cref="Task.Delay(TimeSpan, TimeProvider)"/> and the
+    /// <see cref="CancellationTokenSource(TimeSpan, TimeProvider)"/> timer accept.</summary>
     static readonly TimeSpan LongestTimer = TimeSpan.FromMilliseconds(int.MaxValue);
 
     readonly ContentStore _store;
     readonly HttpClient _http;
     readonly DownloadOptions _options;
-    readonly Func<TimeSpan, CancellationToken, Task> _delay;
+    readonly TimeProvider _timeProvider;
     readonly SemaphoreSlim _requests;
 
     public ObjectDownloader(ContentStore store, HttpClient http, DownloadOptions options)
-        : this(store, http, options, Task.Delay)
+        : this(store, http, options, TimeProvider.System)
     {
     }
 
-    /// <param name="delay">
-    /// Every wait (retries, lock backoff) goes through here, so tests do not sleep. The read idle timeout does not:
-    /// it is a timer inside <see cref="IdleTimeoutStream"/>.
+    /// <param name="timeProvider">
+    /// The clock for every wait and timeout: retry backoff, <c>Retry-After</c> dates, queueing for the download
+    /// lock, the time written into lock holder records, and <see cref="DownloadOptions.ReadIdleTimeout"/>.
     /// </param>
-    internal ObjectDownloader(
-        ContentStore store,
-        HttpClient http,
-        DownloadOptions options,
-        Func<TimeSpan, CancellationToken, Task> delay)
+    public ObjectDownloader(ContentStore store, HttpClient http, DownloadOptions options, TimeProvider timeProvider)
     {
+        ArgumentNullException.ThrowIfNull(timeProvider);
         // Checked here once, so a bad option fails now rather than on every obtain after it has taken a lock.
         ArgumentException.ThrowIfNullOrWhiteSpace(options.UserAgent);
         using (var probe = new HttpRequestMessage())
@@ -57,7 +55,7 @@ public sealed class ObjectDownloader
         _store = store;
         _http = http;
         _options = options;
-        _delay = delay;
+        _timeProvider = timeProvider;
         _requests = new SemaphoreSlim(options.MaxConcurrentRequests);
     }
 
@@ -84,7 +82,7 @@ public sealed class ObjectDownloader
             _store.Program,
             $"download {sha1}",
             _options.LockTimeout,
-            _delay,
+            _timeProvider,
             cancellationToken);
 
         // Whoever held the lock before may have just downloaded it.
@@ -136,7 +134,8 @@ public sealed class ObjectDownloader
 
                     await using var body = new IdleTimeoutStream(
                         await response.Content.ReadAsStreamAsync(cancellationToken),
-                        _options.ReadIdleTimeout);
+                        _options.ReadIdleTimeout,
+                        _timeProvider);
                     return await _store.Importer.ImportAsync(body, expected, cancellationToken);
                 }
 
@@ -148,7 +147,7 @@ public sealed class ObjectDownloader
                 }
 
                 failure = $"HTTP {status}";
-                if (RetryAfter(response.Headers.RetryAfter) is { } retryAfter)
+                if (RetryAfter(response.Headers.RetryAfter, _timeProvider.GetUtcNow()) is { } retryAfter)
                 {
                     wait = retryAfter;
                     waitSource = "Retry-After";
@@ -190,7 +189,7 @@ public sealed class ObjectDownloader
                 return null;
             }
 
-            await _delay(wait, cancellationToken);
+            await Task.Delay(wait, _timeProvider, cancellationToken);
         }
     }
 
@@ -212,12 +211,12 @@ public sealed class ObjectDownloader
     static bool IsRetryable(HttpStatusCode status) =>
         status is HttpStatusCode.RequestTimeout or HttpStatusCode.TooManyRequests || (int)status >= 500;
 
-    static TimeSpan? RetryAfter(RetryConditionHeaderValue? header)
+    static TimeSpan? RetryAfter(RetryConditionHeaderValue? header, DateTimeOffset now)
     {
         if (header?.Delta is { } delta) return delta;
         if (header?.Date is { } date)
         {
-            var wait = date - DateTimeOffset.UtcNow;
+            var wait = date - now;
             return wait > TimeSpan.Zero ? wait : TimeSpan.Zero;
         }
 
