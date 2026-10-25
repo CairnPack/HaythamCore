@@ -49,6 +49,64 @@ public class FakeHttpHandlerTests
         await Assert.ThrowsAsync<InvalidOperationException>(() => client.DeleteAsync(Url, Token));
     }
 
+    [Theory]
+    [InlineData("https://example.invalid/a/b?access_token=SECRET", "/a/b")]
+    [InlineData("https://example.invalid/a/b?x=1&access_token=SECRET&y=2", "/a/b")]
+    [InlineData("https://user:SECRET@example.invalid/a/b", "/a/b")]
+    [InlineData("https://SECRET@example.invalid/a/b", "/a/b")]
+    [InlineData("https://user:SECRET@example.invalid/a/b?access_token=SECRET", "/a/b")]
+    [InlineData("https://example.invalid/a/b#SECRET", "/a/b")]
+    [InlineData("https://example.invalid/a/b?t=SECRET#SECRET", "/a/b")]
+    [InlineData("https://example.invalid/a/b?t=%53ECRET", "/a/b")]
+    [InlineData("https://example.invalid/a/b?t=a%20SECRET%2Fc", "/a/b")]
+    [InlineData("https://user%3ASECRET@example.invalid/a%20b/c", "/a%20b/c")]
+    [InlineData("https://example.invalid:8443/a/b?t=SECRET", "/a/b")]
+    [InlineData("https://example.invalid/a/b", "/a/b")]
+    [InlineData("https://example.invalid/", "/")]
+    public async Task Unmatched_request_message_leaves_out_query_and_user_info(string url, string expectedPath)
+    {
+        foreach (var method in new[] { HttpMethod.Get, HttpMethod.Post, HttpMethod.Delete })
+        {
+            using var handler = new FakeHttpHandler();
+            using var invoker = new HttpMessageInvoker(handler);
+            using var request = new HttpRequestMessage(method, url);
+
+            var error = await Assert.ThrowsAsync<InvalidOperationException>(() => invoker.SendAsync(request, Token));
+
+            Assert.DoesNotContain("SECRET", error.Message);
+            Assert.DoesNotContain("?", error.Message);
+            Assert.DoesNotContain("@", error.Message);
+            Assert.DoesNotContain("#", error.Message);
+            Assert.Contains(method.Method, error.Message);
+            Assert.Contains(expectedPath, error.Message);
+            Assert.Contains("example.invalid", error.Message);
+        }
+    }
+
+    [Fact]
+    public async Task Unmatched_request_message_handles_a_missing_request_uri()
+    {
+        using var handler = new FakeHttpHandler();
+        using var invoker = new HttpMessageInvoker(handler);
+        using var request = new HttpRequestMessage { Method = HttpMethod.Put };
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() => invoker.SendAsync(request, Token));
+
+        Assert.Contains("PUT", error.Message);
+    }
+
+    [Fact]
+    public async Task Unmatched_request_with_a_matching_url_but_other_method_names_the_method()
+    {
+        using var handler = new FakeHttpHandler().Respond(Url + "?token=SECRET", HttpStatusCode.OK);
+        using var client = new HttpClient(handler);
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() => client.DeleteAsync(Url + "?token=SECRET", Token));
+
+        Assert.Contains("DELETE", error.Message);
+        Assert.DoesNotContain("SECRET", error.Message);
+    }
+
     [Fact]
     public async Task Fail_throws_the_given_error()
     {

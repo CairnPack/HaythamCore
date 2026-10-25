@@ -96,7 +96,8 @@ public sealed class FakeHttpHandler : HttpMessageHandler
 
         if (responder is null)
         {
-            throw new InvalidOperationException($"No fake response is configured for {request.Method} {request.RequestUri}.");
+            // RecordedHttpRequest.ToString() leaves out query and user info, which may hold credentials.
+            throw new InvalidOperationException($"No fake response is configured for {recorded}.");
         }
 
         var response = await responder(request, cancellationToken).ConfigureAwait(false);
