@@ -158,6 +158,11 @@ public sealed class ObjectDownloader
                     wait = Backoff(attempt);
                 }
             }
+            catch (Exception e) when (CallerCancellation.Replaces(e, cancellationToken))
+            {
+                // Covers the request and writing the part file too; the body read has already done this itself.
+                throw CallerCancellation.For(e, cancellationToken);
+            }
             catch (StoreException e) when (e.Error == StoreError.ContentMismatch)
             {
                 // A wrong file at this URL will be wrong again; the next candidate may have the right one.
@@ -228,9 +233,12 @@ public sealed class ObjectDownloader
     /// Network failures only. Errors writing the part file are ordinary <see cref="IOException"/>s and are not
     /// retried: a full disk stays full. An <see cref="HttpClient"/> timeout surfaces as a cancellation that the
     /// caller did not ask for; a body that stops sending data, as the <see cref="TimeoutException"/> from
-    /// <see cref="IdleTimeoutStream"/>.
+    /// <see cref="IdleTimeoutStream"/>. Once the caller has cancelled nothing is transient: an attempt that fails then
+    /// is not tried again and does not count towards <see cref="StoreError.DownloadFailed"/>. Errors a cancellation
+    /// may cause have already become the caller's cancellation (<see cref="CallerCancellation"/>); the rest, such as a
+    /// <see cref="StoreException"/>, go up as they are.
     /// </summary>
     static bool IsTransient(Exception e, CancellationToken cancellationToken) =>
-        e is HttpRequestException or HttpIOException or TimeoutException
-        || (e is TaskCanceledException && !cancellationToken.IsCancellationRequested);
+        !cancellationToken.IsCancellationRequested
+        && e is HttpRequestException or HttpIOException or TimeoutException or TaskCanceledException;
 }
