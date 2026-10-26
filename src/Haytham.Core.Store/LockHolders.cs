@@ -51,11 +51,12 @@ static class LockHolders
             Since = since,
         };
 
+        string? temp = null;
         try
         {
             Directory.CreateDirectory(directory);
             RemoveEnded(directory);
-            var temp = Path.Combine(directory, $".{Guid.NewGuid():N}.tmp");
+            temp = Path.Combine(directory, $".{Guid.NewGuid():N}.tmp");
             using (var stream = new FileStream(temp, FileMode.CreateNew, FileAccess.Write, FileShare.None))
                 JsonSerializer.Serialize(stream, record, StoreJsonContext.Default.LockHolderRecord);
             File.Move(temp, path, overwrite: true);
@@ -69,14 +70,24 @@ static class LockHolders
         {
             return null;
         }
+        finally
+        {
+            // After a successful move there is nothing left to delete. Only the file this call created is removed;
+            // a failed cleanup never fails the lock either.
+            if (temp is not null) DeleteQuietly(temp);
+        }
     }
 
     public static void Unregister(string? recordPath)
     {
-        if (recordPath is null) return;
+        if (recordPath is not null) DeleteQuietly(recordPath);
+    }
+
+    static void DeleteQuietly(string path)
+    {
         try
         {
-            File.Delete(recordPath);
+            File.Delete(path);
         }
         catch (IOException)
         {
@@ -86,19 +97,37 @@ static class LockHolders
         }
     }
 
-    /// <summary>A readable list of the live holders, for example <c>gebinde 0.1.0 (PID 1234), download …</c>.</summary>
-    public static string Describe(string lockPath)
+    /// <summary>
+    /// A readable list of the live holders, for example <c>gebinde 0.1.0 (PID 1234), download …</c>. The list is
+    /// extra information on an error that is already being thrown, so a failure to read it never escapes: the text
+    /// then says "an unknown holder" and names the exception type and message that stopped the listing.
+    /// </summary>
+    /// <param name="listRecords">Lists the record files in a holders directory; replaced only by tests.</param>
+    public static string Describe(string lockPath, Func<string, IEnumerable<string>>? listRecords = null)
     {
-        var holders = Read(DirectoryOf(lockPath))
-            .Where(r => new ProcessIdentity(r.Pid, r.StartTime).IsAlive())
-            .Select(r => $"{r.Program} {r.Version} (PID {r.Pid}), {r.Operation}, since {r.Since:u}")
-            .ToList();
-        return holders.Count == 0 ? "an unknown holder" : string.Join("; ", holders);
+        var holders = new List<string>();
+        string? failure = null;
+        try
+        {
+            foreach (var (_, record) in ReadWithPaths(DirectoryOf(lockPath), listRecords ?? ListRecords))
+            {
+                if (new ProcessIdentity(record.Pid, record.StartTime).IsAlive())
+                    holders.Add($"{record.Program} {record.Version} (PID {record.Pid}), {record.Operation}, since {record.Since:u}");
+            }
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+            var reason = e.Message.Split(['\r', '\n'])[0].Trim();
+            failure = $"{e.GetType().Name}: {reason}";
+        }
+
+        var text = holders.Count == 0 ? "an unknown holder" : string.Join("; ", holders);
+        return failure is null ? text : $"{text} (the holder records could not be fully listed: {failure})";
     }
 
     static void RemoveEnded(string directory)
     {
-        foreach (var (path, record) in ReadWithPaths(directory))
+        foreach (var (path, record) in ReadWithPaths(directory, ListRecords))
         {
             if (new ProcessIdentity(record.Pid, record.StartTime).IsAlive()) continue;
             try
@@ -111,13 +140,18 @@ static class LockHolders
         }
     }
 
-    static IEnumerable<LockHolderRecord> Read(string directory) => ReadWithPaths(directory).Select(p => p.Record);
+    static IEnumerable<string> ListRecords(string directory) => Directory.EnumerateFiles(directory, "*.json");
 
-    /// <summary>Records that cannot be read are skipped: they only ever affect what is shown.</summary>
-    static IEnumerable<(string Path, LockHolderRecord Record)> ReadWithPaths(string directory)
+    /// <summary>
+    /// Records that cannot be read are skipped: they only ever affect what is shown. Failing to list the directory
+    /// is not skipped; the caller decides what to do with it.
+    /// </summary>
+    static IEnumerable<(string Path, LockHolderRecord Record)> ReadWithPaths(
+        string directory,
+        Func<string, IEnumerable<string>> listRecords)
     {
         if (!Directory.Exists(directory)) yield break;
-        foreach (var path in Directory.EnumerateFiles(directory, "*.json"))
+        foreach (var path in listRecords(directory))
         {
             LockHolderRecord? record;
             try

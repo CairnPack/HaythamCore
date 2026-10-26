@@ -68,12 +68,7 @@ public sealed class ContentStore
         {
             if (mode != StoreOpenMode.CreateIfMissing)
                 throw new StoreException(StoreError.StoreMissing, $"There is no store at '{layout.Root}'.");
-            if (HasOtherEntries(layout.Root))
-                throw new StoreException(
-                    StoreError.NotAStore,
-                    $"'{layout.Root}' is not empty and has no format.json, so it is not taken over as a store.");
-            Directory.CreateDirectory(layout.Root);
-            format = StoreFormat.Create(layout);
+            format = CreateOrJoin(layout);
         }
 
         var store = new ContentStore(layout, format, program ?? ProgramInfo.Unknown);
@@ -153,9 +148,33 @@ public sealed class ContentStore
         return variable is "1" || string.Equals(variable, "true", StringComparison.OrdinalIgnoreCase);
     }
 
-    /// <summary>True when the directory holds anything besides a store being created right now.</summary>
-    static bool HasOtherEntries(string root) =>
-        Directory.Exists(root)
-        && Directory.EnumerateFileSystemEntries(root)
-            .Any(entry => !Path.GetFileName(entry).StartsWith(StoreLayout.FormatTempPrefix, StringComparison.Ordinal));
+    /// <summary>
+    /// Runs when <c>format.json</c> was missing a moment ago. Another program may have created the store since, so a
+    /// non-empty directory is checked for <c>format.json</c> once more before it is refused.
+    /// </summary>
+    internal static StoreFormatFile CreateOrJoin(StoreLayout layout)
+    {
+        if (HasOtherEntries(layout.Root))
+        {
+            if (File.Exists(layout.FormatFile)) return StoreFormat.Read(layout);
+            throw new StoreException(
+                StoreError.NotAStore,
+                $"'{layout.Root}' is not empty and has no format.json, so it is not taken over as a store.");
+        }
+
+        Directory.CreateDirectory(layout.Root);
+        return StoreFormat.Create(layout);
+    }
+
+    /// <summary>
+    /// True when the directory holds anything besides the temporary file of a store being created right now: only a
+    /// regular file named exactly like the ones <see cref="StoreLayout.NewFormatTempPath"/> makes is ignored.
+    /// </summary>
+    static bool HasOtherEntries(string root)
+    {
+        var directory = new DirectoryInfo(root);
+        return directory.Exists
+            && directory.EnumerateFileSystemInfos()
+                .Any(entry => entry is not FileInfo || !StoreLayout.IsFormatTempName(entry.Name));
+    }
 }
