@@ -25,7 +25,7 @@ public class FileLockTests
             await _clock.AdvancePastNextTimerAsync(TimeSpan.FromMilliseconds(50));
             await _clock.AdvancePastNextTimerAsync(TimeSpan.FromMilliseconds(100));
             await _clock.AdvancePastNextTimerAsync(TimeSpan.FromMilliseconds(50));
-            var error = await Assert.ThrowsAsync<StoreException>(() => waiting);
+            var error = await Assert.ThrowsAsync<StoreException>(() => _clock.WithWatchdogAsync(waiting));
 
             Assert.Equal(StoreError.LockTimeout, error.Error);
             Assert.Contains($"store-tests 1.0 (PID {Environment.ProcessId})", error.Message);
@@ -160,6 +160,6 @@ public class FileLockTests
         Assert.Equal(TimeSpan.FromMilliseconds(50), await _clock.NextTimerAsync());
         await cancel.CancelAsync();
 
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => waiting);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => _clock.WithWatchdogAsync(waiting));
     }
 }
