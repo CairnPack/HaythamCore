@@ -23,6 +23,8 @@ Status: implemented
 
 - `format.json` 不存在、并且允许创建时，`ContentStore.Open` 调用 `ContentStore.CreateOrJoin`。它先判断目录是否有别的内容；有的话，抛 `NotAStore` 之前再看一次 `format.json`，存在就走和已有仓库相同的读取路径（`StoreFormat.Read`，格式损坏照常抛 `FormatUnreadable`，从不覆盖）；没有才抛 `NotAStore`。目录为空时照旧创建。
 - `CreateOrJoin` 是 `internal`，这样测试可以直接构造“第一次检查已经过时”的状态，不需要在 `Open` 里加钩子或委托，也不加任何公开接口。
+- `Open` 与 `CreateOrJoin` 读已有仓库用的是同一个 `StoreFormat.Read`；读出的格式文件再交给同一个 `ContentStore` 构造函数，只读判断（较新的写入格式、文件锁被关掉）也在那里做，所以两条路径没有各自的一份读取逻辑。
+- 对应的测试模拟的是交错的结果，不是交错本身：它直接构造“`format.json` 已经出现”的目录再调用 `CreateOrJoin`，没有让两个创建者真的交错。
 
 ### 占用者的显示
 
@@ -54,6 +56,6 @@ Status: implemented
 
 ## Verification
 
-- `tests/Haytham.Core.Store.Tests/StoreOpenTests.cs`：`.format-` 开头的条目哪些被拒绝、哪些被忽略；`CreateOrJoin` 对已建好的仓库返回同一个 `storeId`，对损坏的 `format.json` 仍抛 `FormatUnreadable`，对没有 `format.json` 的非空目录仍抛 `NotAStore`。
+- `tests/Haytham.Core.Store.Tests/StoreOpenTests.cs`：`.format-` 开头的条目哪些被拒绝、哪些被忽略；`CreateOrJoin` 对另一方写好的 `format.json`（格式 2、指定的 `storeId`）读出同一份内容且不改写文件，对损坏的 `format.json` 仍抛 `FormatUnreadable`，对没有 `format.json` 的非空目录仍抛 `NotAStore`。
 - `tests/Haytham.Core.Store.Tests/FileLockTests.cs`：占用者目录被删后超时仍是 `LockTimeout`；列目录失败时 `Describe` 返回“未知占用者”加失败原因，迭代中途失败保留已读到的占用者；记录的目标名被目录占住时 `Register` 返回 `null`、没有遗留临时文件、拿锁照常成功。
 - 运行 `dotnet test` 时看上面两个文件。
