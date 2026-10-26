@@ -40,7 +40,7 @@ Status: implemented
 
 - `StoreOpenMode.OpenExisting`（默认）：没有 `format.json` 就抛 `StoreError.StoreMissing`，不创建任何东西。这对应“位置记录指向的目录不存在时 must 报错”；只有调用方确定要创建时才传 `CreateIfMissing`。
 - `CreateIfMissing`：目录不存在或为空时创建仓库；目录里已经有别的东西、却没有 `format.json`，抛 `StoreError.NotAStore`，never 把一个普通目录当成仓库接管。
-- 创建是原子的：先在仓库根目录写 `.format-<guid>.tmp`，再不覆盖地移成 `format.json`。两个进程同时创建时，后到的一方移动失败，改读先到者写下的文件，两边拿到同一个 `storeId`。判断“目录为空”时忽略 `.format-*.tmp`，免得后到的一方把先到者的临时文件当成“目录里有别的东西”。
+- 创建是原子的：先在仓库根目录写 `.format-<guid>.tmp`，再不覆盖地移成 `format.json`。两个进程同时创建时，后到的一方移动失败，改读先到者写下的文件，两边拿到同一个 `storeId`。判断“目录为空”时只忽略名字完全是 `.format-<32 位小写十六进制>.tmp` 的普通文件，免得后到的一方把先到者的临时文件当成“目录里有别的东西”；同前缀的目录和名字不完全匹配的文件都算已有内容（见[四处小缺陷](../bug-fix/2026-10-27-store-small-fixes.md)）。非空目录里若 `format.json` 已出现，按已有仓库打开。
 
 ### 纳入
 

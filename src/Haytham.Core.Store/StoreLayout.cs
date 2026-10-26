@@ -4,7 +4,8 @@ namespace Haytham.Core.Store;
 sealed class StoreLayout(string root)
 {
     /// <summary>Prefix of the temporary file that becomes <c>format.json</c> when a store is created.</summary>
-    public const string FormatTempPrefix = ".format-";
+    const string FormatTempPrefix = ".format-";
+    const string FormatTempSuffix = ".tmp";
 
     public string Root { get; } = root;
 
@@ -28,7 +29,20 @@ sealed class StoreLayout(string root)
         return Path.Combine(ObjectsDirectory, hex[..2], hex);
     }
 
-    public string NewFormatTempPath() => Path.Combine(Root, $"{FormatTempPrefix}{Guid.NewGuid():N}.tmp");
+    public string NewFormatTempPath() => Path.Combine(Root, $"{FormatTempPrefix}{Guid.NewGuid():N}{FormatTempSuffix}");
+
+    /// <summary>True for exactly the file names <see cref="NewFormatTempPath"/> makes: prefix, 32 lowercase hex digits, suffix.</summary>
+    public static bool IsFormatTempName(string name)
+    {
+        if (!name.StartsWith(FormatTempPrefix, StringComparison.Ordinal)
+            || !name.EndsWith(FormatTempSuffix, StringComparison.Ordinal))
+            return false;
+        var id = name.AsSpan(FormatTempPrefix.Length, name.Length - FormatTempPrefix.Length - FormatTempSuffix.Length);
+        if (id.Length != 32) return false;
+        foreach (var c in id)
+            if (c is not (>= '0' and <= '9' or >= 'a' and <= 'f')) return false;
+        return true;
+    }
 
     public string NewPartPath() => Path.Combine(TempDirectory, $"object-{Guid.NewGuid():N}.part");
 
