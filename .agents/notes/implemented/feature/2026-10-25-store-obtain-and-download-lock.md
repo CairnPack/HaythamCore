@@ -78,7 +78,7 @@ Store 里凡是“现在几点”和“过了多久”，都问同一个 .NET �
 
 为什么要注入时钟，而不是只注入“等待”：原来的 `delay` 回调只能替换“等”这个动作，`FileLock` 用 `Stopwatch` 算“已经等了多久”、`Retry-After` 的日期用 `DateTimeOffset.UtcNow`、空闲超时用 `CancelAfter` 的系统计时器，这三处测试都控制不了，等锁超时与空闲超时的测试只能真的等。`TimeProvider` 同时提供计时器、时间戳和当前时间，测试换成假时钟后，“等了多久”和“等多久”由同一个时钟决定，测试不再依赖真实时间。
 
-测试用 `Microsoft.Extensions.TimeProvider.Testing` 的 `FakeTimeProvider`（MIT，只在测试项目引用，登记在仓库根目录的 `THIRD_PARTY_NOTICES.md`）。测试里的 `TestClock` 继承它，每启动一个计时器就报告它的时长；测试按顺序等下一个计时器、核对时长、把时钟推过去，所以每次等待的时长都被断言，而且不推进就不会触发。`ObjectDownloaderTests` 默认关掉空闲超时，这样下载器启动的计时器都是等待；测空闲超时的几个测试再单独打开。“并发 obtain 只下载一次”这一个测试仍用真实时钟：三个等锁的调用在持有者写盘期间要重试几次取决于机器快慢，没有固定的计时器顺序可以一步步推进。
+测试用 `Microsoft.Extensions.TimeProvider.Testing` 的 `FakeTimeProvider`（MIT，只在测试项目引用，登记在仓库根目录的 `THIRD_PARTY_NOTICES.md`）。测试里的 `TestClock` 继承它，每启动一个计时器就报告它的时长；测试按顺序等下一个计时器、核对时长、把时钟推过去，所以每次等待的时长都被断言，而且不推进就不会触发。等整个操作结束时，测试经过 `WithWatchdogAsync`，用真实时钟给它一个上限。`ObjectDownloaderTests` 默认关掉空闲超时，这样下载器启动的计时器都是等待；测空闲超时的几个测试再单独打开。“并发 obtain 只下载一次”这一个测试仍用真实时钟：三个等锁的调用在持有者写盘期间要重试几次取决于机器快慢，没有固定的计时器顺序可以一步步推进。
 
 ### 参数提前校验
 
@@ -143,8 +143,8 @@ POSIX 上，`FileShare` 背后的 `flock` 可以被 AppContext 开关 `System.IO
 - 代价：仍然没有仓库锁，obtain 与 GC 还不能安全并存；GC 落地时要补上写入会话（锁与并发笔记的“仓库锁”）。
 - 代价：同一片里不相干的两个下载要排队；同时下载 8 个对象时约 0.7% 的概率（锁与并发笔记的估算）。
 - 收益：除了并发下载的那一个测试，计时相关的测试都推进假时钟，不再真的等待；等锁的退避序列（50、100、50 ms）、空闲超时、`Retry-After` 日期这些以前没法精确断言的时长，现在都直接断言。
-- 代价：测试项目多了一个包 `Microsoft.Extensions.TimeProvider.Testing`（只用于测试，不随 Store 包分发）。用假时钟的测试要按顺序写出每一次等待；代码多等了一次而测试没有推进时钟，测试会一直卡住，而不是立刻失败（少等了一次时，`TestClock` 会在 10 秒后报错）。
-- 代价：POSIX 上“被占用”的判断依赖 .NET 把 errno 放进 `HResult`，这是 runtime 源码里的行为，没有正式文档；本机只在 Windows 上跑过测试，Haytham Core 的 CI 目前只在三平台 `dotnet build`，不跑测试。
+- 代价：测试项目多了一个包 `Microsoft.Extensions.TimeProvider.Testing`（只用于测试，不随 Store 包分发）。用假时钟的测试要按顺序写出每一次等待；代码多等了一次而测试没有推进时钟，操作会停在没人推进的假时钟上；测试经过 `TestClock.WithWatchdogAsync` 等整个操作，30 秒真实时间后失败，并在信息里列出观察到的计时器序列（少等了一次时，`NextTimerAsync` 会在 10 秒后报错，信息同样列出计时器序列）。见[假时钟的看门狗](../testing/2026-10-27-fake-clock-watchdog.md)。
+- 代价：POSIX 上“被占用”的判断依赖 .NET 把 errno 放进 `HResult`，这是 runtime 源码里的行为，没有正式文档；本机只在 Windows 上跑过测试；Haytham Core 的 CI 在三平台 `dotnet build` 之后运行 `dotnet test`，见[子模块 CI 运行测试](../process/2026-10-27-ci-runs-tests.md)，但 Linux 与 macOS 的结果在写这条时还没有看到。
 - 测试：`FileLockTests` 覆盖同一进程的第二个句柄排队、按 50、100、50 ms 退避后超时并列出占用者（记录的 `since` 来自注入的时钟），记录只在持有期间存在，已结束进程的记录被清掉、不显示，等待可取消。`ObjectDownloaderTests` 覆盖下载与 User-Agent、已存在时不联网、5xx 翻倍重试、429 遵守 `Retry-After`（秒数与日期两种，日期按注入时钟的“现在”计算）、超过上限换地址、404 不重试、内容不符换地址、网络错误重试到上限并列出每个原因、等锁超时列出占用者、等锁之后发现对象已在而不再下载、已有对象的大小或 sha512 不符时抛出与纳入相同的 `ContentMismatch` 且不发请求（加锁前与等锁之后两处）、已有对象全部相符时返回 `AlreadyPresent`、并发 obtain 只下载一次、只读仓库拒绝下载；还覆盖响应体停住时超时并重试、一直停住时失败原因写明空闲超时、停住时调用方取消照常抛出且不重试、读响应体中途出错时重试、不合法的 User-Agent 在构造时报错、不合法的 SHA-512 与负的大小在任何请求之前报错（对象已在仓库时也报）、退避超过上限时换地址且不说成 `Retry-After`（状态码与网络错误两个分支）、64 次尝试不溢出、`Content-Length` 与期望大小不同时不读响应体就换地址。
 - 验证缺口：空闲超时只用测试里的假流验证过；真实的 `SocketsHttpHandler` 在读被取消时抛什么异常没有实测，代码按计时器状态判断，就是为了不依赖这一点。
 - 验证缺口：锁与并发笔记要求的“子进程持锁”契约测试还没有，现在只用同一进程的两个句柄验证；POSIX 上的行为没有实测；`DisableFileLocking` 的只读检查没有测试（Windows 上不生效，在测试进程里打开开关会影响其他测试）。

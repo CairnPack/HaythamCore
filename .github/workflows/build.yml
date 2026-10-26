@@ -17,6 +17,7 @@ jobs:
         with:
           global-json-file: global.json
       - run: dotnet build HaythamCore.slnx -c Release
+      - run: dotnet test --solution HaythamCore.slnx -c Release --no-build
 
   notes:
     runs-on: ubuntu-latest
