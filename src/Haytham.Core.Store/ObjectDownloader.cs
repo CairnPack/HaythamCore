@@ -228,9 +228,11 @@ public sealed class ObjectDownloader
     /// Network failures only. Errors writing the part file are ordinary <see cref="IOException"/>s and are not
     /// retried: a full disk stays full. An <see cref="HttpClient"/> timeout surfaces as a cancellation that the
     /// caller did not ask for; a body that stops sending data, as the <see cref="TimeoutException"/> from
-    /// <see cref="IdleTimeoutStream"/>.
+    /// <see cref="IdleTimeoutStream"/>. Once the caller has cancelled nothing is transient: whatever the request or
+    /// the read threw goes up as it is, without another attempt and without turning into
+    /// <see cref="StoreError.DownloadFailed"/>.
     /// </summary>
     static bool IsTransient(Exception e, CancellationToken cancellationToken) =>
-        e is HttpRequestException or HttpIOException or TimeoutException
-        || (e is TaskCanceledException && !cancellationToken.IsCancellationRequested);
+        !cancellationToken.IsCancellationRequested
+        && e is HttpRequestException or HttpIOException or TimeoutException or TaskCanceledException;
 }

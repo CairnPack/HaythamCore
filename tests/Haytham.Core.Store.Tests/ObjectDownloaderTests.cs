@@ -70,6 +70,36 @@ public sealed class ObjectDownloaderTests : IDisposable
             return 0;
         });
 
+    /// <summary>
+    /// A body that sends part of the file, then holds its next read until that read is cancelled and
+    /// <paramref name="release"/> completes, and fails it with <paramref name="error"/>, as a connection aborted
+    /// mid-body may. <paramref name="reading"/> completes once that read has started.
+    /// </summary>
+    static ScriptedStream AbortedWhenCancelled(Exception error, TaskCompletionSource reading, Task release) =>
+        new(Encoding.UTF8.GetBytes(Body[..10]), async cancellationToken =>
+        {
+            reading.TrySetResult();
+            try
+            {
+                await Task.Delay(Timeout.Infinite, cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+            }
+
+            await release;
+            throw error;
+        });
+
+    /// <summary>What an aborted body read throws: a plain I/O error, an HTTP one, or a cancellation with no token.</summary>
+    static Exception ReadError(string thrown) => thrown switch
+    {
+        "IOException" => new IOException("connection aborted"),
+        "HttpIOException" => new HttpIOException(HttpRequestError.ResponseEnded, "connection reset mid-body"),
+        "OperationCanceledException" => new OperationCanceledException("read cancelled"),
+        _ => throw new ArgumentOutOfRangeException(nameof(thrown), thrown, null),
+    };
+
     public void Dispose()
     {
         _http.Dispose();
@@ -302,6 +332,84 @@ public sealed class ObjectDownloaderTests : IDisposable
         await cancel.CancelAsync();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => obtain);
 
+        Assert.Single(_http.Requests);
+        Assert.Equal([TimeSpan.FromSeconds(30)], _clock.Timers);
+        Assert.Empty(_dir.TempEntries());
+    }
+
+    [Theory]
+    [InlineData("IOException", "last attempt")]
+    [InlineData("IOException", "backoff above the limit")]
+    [InlineData("IOException", "attempts left")]
+    [InlineData("HttpIOException", "last attempt")]
+    [InlineData("HttpIOException", "backoff above the limit")]
+    [InlineData("HttpIOException", "attempts left")]
+    [InlineData("OperationCanceledException", "last attempt")]
+    [InlineData("OperationCanceledException", "backoff above the limit")]
+    [InlineData("OperationCanceledException", "attempts left")]
+    public async Task Cancelling_while_the_body_is_read_throws_the_callers_cancellation_whatever_the_read_throws(
+        string thrown,
+        string retries)
+    {
+        var store = _dir.Create();
+        var reading = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _http.Respond(HttpMethod.Get, Modrinth, Streamed(AbortedWhenCancelled(ReadError(thrown), reading, Task.CompletedTask)));
+        var options = retries switch
+        {
+            "last attempt" => Options with { MaxAttemptsPerUrl = 1 },
+            "backoff above the limit" => Options with { MaxRetryAfter = TimeSpan.Zero },
+            _ => Options,
+        };
+        using var cancel = CancellationTokenSource.CreateLinkedTokenSource(Token);
+
+        var obtain = Downloader(store, options).ObtainAsync(Request(Modrinth), cancel.Token);
+        await reading.Task.WaitAsync(Token);
+        await cancel.CancelAsync();
+        var error = await Assert.ThrowsAnyAsync<OperationCanceledException>(() => obtain);
+
+        Assert.Equal(cancel.Token, error.CancellationToken);
+        Assert.Single(_http.Requests);
+        Assert.Empty(_clock.Timers);
+        Assert.Equal(ObjectState.Missing, await store.VerifyAsync(BodySha1, VerifyMode.Full, Token));
+        Assert.Empty(_dir.TempEntries());
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Cancelling_as_the_idle_timer_fires_throws_the_callers_cancellation_on_the_last_attempt(
+        bool timerFirst)
+    {
+        var store = _dir.Create();
+        var reading = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _http.Respond(
+            HttpMethod.Get,
+            Modrinth,
+            Streamed(AbortedWhenCancelled(ReadError("HttpIOException"), reading, release.Task)));
+        var options = Options with { MaxAttemptsPerUrl = 1, ReadIdleTimeout = TimeSpan.FromSeconds(30) };
+        using var cancel = CancellationTokenSource.CreateLinkedTokenSource(Token);
+
+        var obtain = Downloader(store, options).ObtainAsync(Request(Modrinth), cancel.Token);
+        await reading.Task.WaitAsync(Token);
+        // The body read is held until both have happened, so the read fails with the timer fired and the caller
+        // cancelled, in either order.
+        if (timerFirst)
+        {
+            await _clock.AdvancePastNextTimerAsync(TimeSpan.FromSeconds(30));
+            await cancel.CancelAsync();
+        }
+        else
+        {
+            Assert.Equal(TimeSpan.FromSeconds(30), await _clock.NextTimerAsync());
+            await cancel.CancelAsync();
+            _clock.Advance(TimeSpan.FromSeconds(30));
+        }
+
+        release.SetResult();
+        var error = await Assert.ThrowsAnyAsync<OperationCanceledException>(() => obtain);
+
+        Assert.Equal(cancel.Token, error.CancellationToken);
         Assert.Single(_http.Requests);
         Assert.Equal([TimeSpan.FromSeconds(30)], _clock.Timers);
         Assert.Empty(_dir.TempEntries());

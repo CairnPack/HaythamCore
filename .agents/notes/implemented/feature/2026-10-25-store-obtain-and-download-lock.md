@@ -37,7 +37,7 @@ Status: implemented
 | `HttpRequestException`、`HttpIOException`（包括读响应体中途出错）、`HttpClient` 自己的超时 | 重试 |
 | 响应体超过 `ReadIdleTimeout`（默认 30 秒）没有新数据 | 按网络错误重试，计入这个 URL 的尝试次数 |
 | 写 `.part` 时的普通 `IOException`（例如磁盘满） | 不重试，直接抛出：磁盘满了，重试也还是满的 |
-| 调用方取消 | 直接抛出 |
+| 调用方取消 | 直接抛出取消异常，不重试，也不算进 `DownloadFailed`（见下面的“调用方取消优先”） |
 
 - `UserAgent` 是 `DownloadOptions` 的 `required` 属性，每个请求都带上；库里不写默认值。
 - 同一个 `ObjectDownloader` 同时在途的请求不超过 `MaxConcurrentRequests`（默认 8）。重试前的等待不占名额。
@@ -49,10 +49,20 @@ Status: implemented
 
 - 下载层用 `IdleTimeoutStream` 包住响应流。它每次 `ReadAsync` 都在注入的 `TimeProvider` 上新建一个 `ReadIdleTimeout` 后触发的计时器（`new CancellationTokenSource(ReadIdleTimeout, timeProvider)`），再和调用方的令牌联动成这一次读用的令牌；读到数据就作废，下一次读再重新计时。所以“空闲”指的是一次读等了多久，慢但一直有数据的下载 never 被掐断，两次读之间算哈希、写磁盘的时间也不算进去。
 - 计时器触发、调用方没有取消时，抛 `TimeoutException`（消息是 “No data received for …s.”），`IsTransient` 把它当网络错误重试。判断看的是计时器和调用方令牌的状态，不看异常类型：取消一次读，底层可能抛 `OperationCanceledException`，也可能因为连接被中止而抛 `IOException`。
-- 调用方自己取消时，即使计时器也同时触发，也照常抛 `OperationCanceledException`，不重试。
+- 调用方自己取消时，即使计时器也同时触发，也照常抛 `OperationCanceledException`，不重试，见下一节。
 - 只有异步读计时；同步的 `Read` 直接转给内层流。`ContentHasher` 只用异步读。
 - 默认 30 秒。正常的连接在 30 秒里总会送来数据，连 TCP 重传也会在这段时间里发生几次；而一次停住最多白占锁约 30 秒乘以尝试次数（默认 3 次，再加上 1 秒、2 秒的退避），比别人等锁的上限 `LockTimeout`（15 分钟）小得多。`Timeout.InfiniteTimeSpan` 表示不限，这时不建计时器，读直接转给内层流。
 - 超时放在下载层，不放进 `ContentHasher` 的读循环：那个循环也用于从本地文件纳入，那里没有“空闲”可言；读循环的大小上限（复制时超过期望大小就中止）也在那里，由纳入那边负责。
+
+### 调用方取消优先
+
+调用方的令牌一旦取消，下载 must 抛出带调用方令牌的 `OperationCanceledException`，never 重试，也 never 把这次失败写进 `DownloadFailed` 的原因里。规则由两处一起守住：
+
+- 读响应体的边界在 `IdleTimeoutStream.ReadAsync`。读失败时，只要调用方的令牌已经取消，不论内层流抛的是 `OperationCanceledException`、`HttpIOException` 还是普通的 `IOException`，也不论空闲计时器是否同时触发，都换成带调用方令牌的 `OperationCanceledException`，原来的异常作为内部异常保留；内层流抛的本来就是调用方令牌的取消，就原样抛出。空闲超时关掉（`Timeout.InfiniteTimeSpan`）时也一样。这样做是因为取消一次读，底层可能因为连接被中止而抛 I/O 错误，而 `HttpIOException` 在重试判断里算网络错误。
+- `IsTransient` 在调用方的令牌已经取消时一律回答“不是网络错误”。所以别处抛出的异常（例如发请求时）也照原样抛出，不进入重试、退避与“超过上限换地址”的判断，不会在最后一次尝试时降格成 `DownloadFailed`。发请求阶段的网络异常，`HttpClient` 在调用方取消时本身就会换成取消异常。
+- 换成取消异常的只有读响应体时抛出的异常。写 `.part` 的磁盘错误不经过这个流，仍按原来的规则直接抛出；没有取消时，读响应体的 `IOException` 也不会因此被当成网络错误重试。
+
+这条规则是 2026-10-27 后端审查的 B05 补上的：原来 `IdleTimeoutStream` 只在调用方没有取消时改写异常，`IsTransient` 只对 `TaskCanceledException` 看令牌；自定义 handler 的响应流在取消后抛 `HttpIOException(ResponseEnded)`、`MaxAttemptsPerUrl = 1` 时，公开接口会返回 `DownloadFailed`。标准的 `SocketsHttpHandler` 取消时通常抛取消异常，所以这主要出现在自定义 handler，或者取消与其他故障同时发生的时候。
 
 ### 等待的上限与退避
 
@@ -127,6 +137,7 @@ POSIX 上，`FileShare` 背后的 `flock` 可以被 AppContext 开关 `System.IO
 - **内容不符时也在同一个 URL 重试** — 最有力的理由：可能只是传输中途被截断、CDN 偶尔返回旧文件。不采用：截断表现为连接错误，已经会重试；返回完整但错误的文件，多半是那个地址本身错了，换下一个候选更快。
 - **任何 `IOException` 都重试** — 最有力的理由：网络读取的错误有时只是普通的 `IOException`，一律重试最不容易漏。不采用：写 `.part` 的磁盘错误也是 `IOException`，重试只会多等几秒再失败；.NET 8 起网络读取的错误是 `HttpIOException`，可以分开。
 - **不做占用者记录，超时只说“等不到锁”** — 最有力的理由：少一套落盘格式，这一批小一些。不采用（2026-10-25 用户确认）：锁与并发笔记要求超时时说明是谁占着；这套记录之后的仓库锁、临时目录锁都要用，现在做好可以直接复用。
+- **调用方取消后，在 `ObjectDownloader` 里把任何异常都换成取消异常** — 最有力的理由：只改一处，发请求、读响应体、写磁盘都覆盖到，不用在流包装里另加判断。不采用：取消的同时发生的磁盘写错误等真正的故障会被藏起来，调用方只看到“已取消”；只有读响应体这一层能确定异常来自被中止的读，所以换成取消异常的范围限定在 `IdleTimeoutStream`，其余异常只是不再重试、照原样抛出。
 - **用 `HttpClient.Timeout` 管住整个下载（`ResponseContentRead`，或者给整个响应体设一个总时限）** — 最有力的理由：不用另写流包装，一个参数就能限制占锁的总时间。不采用：`ResponseContentRead` 会把整个文件先缓冲进内存；总时限会掐断又大又慢、但一直有数据的正常下载。空闲超时只抓“停住”这一种情况。
 - **把空闲超时写进 `ContentHasher` 的读循环** — 最有力的理由：读循环本来就在逐块读，在那里重置计时器最直接，不用多一个类。不采用：那个循环也用于从本地文件纳入，没有网络就没有空闲超时可言；放在下载层，纳入那边的代码不必知道网络。
 - **退避超过上限时截到 `MaxRetryAfter`，继续重试** — 最有力的理由：调用方调大 `MaxAttemptsPerUrl` 就是想多试几次，截断能让每一次都真的发生。不采用：等待期间一直占着下载锁，64 次尝试会让同一片的其他下载跟着等上一个小时；还有别的候选 URL 时，换地址更好。而且状态码分支原本就是“超过上限就换地址”，两个分支用同一条规则更容易讲清楚。
@@ -145,6 +156,6 @@ POSIX 上，`FileShare` 背后的 `flock` 可以被 AppContext 开关 `System.IO
 - 收益：除了并发下载的那一个测试，计时相关的测试都推进假时钟，不再真的等待；等锁的退避序列（50、100、50 ms）、空闲超时、`Retry-After` 日期这些以前没法精确断言的时长，现在都直接断言。
 - 代价：测试项目多了一个包 `Microsoft.Extensions.TimeProvider.Testing`（只用于测试，不随 Store 包分发）。用假时钟的测试要按顺序写出每一次等待；代码多等了一次而测试没有推进时钟，测试会一直卡住，而不是立刻失败（少等了一次时，`TestClock` 会在 10 秒后报错）。
 - 代价：POSIX 上“被占用”的判断依赖 .NET 把 errno 放进 `HResult`，这是 runtime 源码里的行为，没有正式文档；本机只在 Windows 上跑过测试，Haytham Core 的 CI 目前只在三平台 `dotnet build`，不跑测试。
-- 测试：`FileLockTests` 覆盖同一进程的第二个句柄排队、按 50、100、50 ms 退避后超时并列出占用者（记录的 `since` 来自注入的时钟），记录只在持有期间存在，已结束进程的记录被清掉、不显示，等待可取消。`ObjectDownloaderTests` 覆盖下载与 User-Agent、已存在时不联网、5xx 翻倍重试、429 遵守 `Retry-After`（秒数与日期两种，日期按注入时钟的“现在”计算）、超过上限换地址、404 不重试、内容不符换地址、网络错误重试到上限并列出每个原因、等锁超时列出占用者、等锁之后发现对象已在而不再下载、已有对象的大小或 sha512 不符时抛出与纳入相同的 `ContentMismatch` 且不发请求（加锁前与等锁之后两处）、已有对象全部相符时返回 `AlreadyPresent`、并发 obtain 只下载一次、只读仓库拒绝下载；还覆盖响应体停住时超时并重试、一直停住时失败原因写明空闲超时、停住时调用方取消照常抛出且不重试、读响应体中途出错时重试、不合法的 User-Agent 在构造时报错、不合法的 SHA-512 与负的大小在任何请求之前报错（对象已在仓库时也报）、退避超过上限时换地址且不说成 `Retry-After`（状态码与网络错误两个分支）、64 次尝试不溢出、`Content-Length` 与期望大小不同时不读响应体就换地址。
+- 测试：`FileLockTests` 覆盖同一进程的第二个句柄排队、按 50、100、50 ms 退避后超时并列出占用者（记录的 `since` 来自注入的时钟），记录只在持有期间存在，已结束进程的记录被清掉、不显示，等待可取消。`ObjectDownloaderTests` 覆盖下载与 User-Agent、已存在时不联网、5xx 翻倍重试、429 遵守 `Retry-After`（秒数与日期两种，日期按注入时钟的“现在”计算）、超过上限换地址、404 不重试、内容不符换地址、网络错误重试到上限并列出每个原因、等锁超时列出占用者、等锁之后发现对象已在而不再下载、已有对象的大小或 sha512 不符时抛出与纳入相同的 `ContentMismatch` 且不发请求（加锁前与等锁之后两处）、已有对象全部相符时返回 `AlreadyPresent`、并发 obtain 只下载一次、只读仓库拒绝下载；还覆盖响应体停住时超时并重试、一直停住时失败原因写明空闲超时、停住时调用方取消照常抛出且不重试、读响应体时调用方取消而内层流抛 `IOException`／`HttpIOException`／不带令牌的取消异常时都抛出带调用方令牌的取消异常（分别在最后一次尝试、退避超过上限、还有剩余尝试三种情况下，只发一次请求、不启动退避计时器）、空闲计时器触发与调用方取消同时发生（两种先后顺序）时在最后一次尝试抛出调用方的取消异常而不是 `DownloadFailed`、读响应体中途出错时重试、不合法的 User-Agent 在构造时报错、不合法的 SHA-512 与负的大小在任何请求之前报错（对象已在仓库时也报）、退避超过上限时换地址且不说成 `Retry-After`（状态码与网络错误两个分支）、64 次尝试不溢出、`Content-Length` 与期望大小不同时不读响应体就换地址。
 - 验证缺口：空闲超时只用测试里的假流验证过；真实的 `SocketsHttpHandler` 在读被取消时抛什么异常没有实测，代码按计时器状态判断，就是为了不依赖这一点。
 - 验证缺口：锁与并发笔记要求的“子进程持锁”契约测试还没有，现在只用同一进程的两个句柄验证；POSIX 上的行为没有实测；`DisableFileLocking` 的只读检查没有测试（Windows 上不生效，在测试进程里打开开关会影响其他测试）。
