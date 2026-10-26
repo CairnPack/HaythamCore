@@ -11,7 +11,8 @@ namespace Haytham.Core.Store;
 /// <remarks>
 /// The caller's own cancellation always wins: when its token is cancelled a failed read throws an
 /// <see cref="OperationCanceledException"/> for that token, even if the idle timer fired too or the inner stream
-/// threw an <see cref="IOException"/> from the aborted connection. This holds with the timer turned off as well.
+/// threw an <see cref="IOException"/> from the aborted connection (see <see cref="CallerCancellation"/>). This holds
+/// with the timer turned off as well.
 /// Only the asynchronous reads are timed; the synchronous <see cref="Read(byte[], int, int)"/> passes straight
 /// through.
 /// </remarks>
@@ -39,9 +40,9 @@ sealed class IdleTimeoutStream(Stream inner, TimeSpan timeout, TimeProvider time
             {
                 return await inner.ReadAsync(buffer, cancellationToken).ConfigureAwait(false);
             }
-            catch (Exception e) when (cancellationToken.IsCancellationRequested)
+            catch (Exception e) when (CallerCancellation.Replaces(e, cancellationToken))
             {
-                throw CallerCancelled(e, cancellationToken);
+                throw CallerCancellation.For(e, cancellationToken);
             }
         }
 
@@ -53,11 +54,11 @@ sealed class IdleTimeoutStream(Stream inner, TimeSpan timeout, TimeProvider time
         {
             return await inner.ReadAsync(buffer, read.Token).ConfigureAwait(false);
         }
-        catch (Exception e) when (cancellationToken.IsCancellationRequested)
+        catch (Exception e) when (CallerCancellation.Replaces(e, cancellationToken))
         {
-            throw CallerCancelled(e, cancellationToken);
+            throw CallerCancellation.For(e, cancellationToken);
         }
-        catch (Exception e) when (idle.IsCancellationRequested)
+        catch (Exception e) when (idle.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
         {
             // Cancelling a read may surface as an OperationCanceledException or as an IOException from the
             // aborted connection, so the timer's state decides, not the exception type.
@@ -66,16 +67,6 @@ sealed class IdleTimeoutStream(Stream inner, TimeSpan timeout, TimeProvider time
                 e);
         }
     }
-
-    /// <summary>
-    /// The exception for a read that failed after the caller cancelled. Its own cancellation passes through as it is;
-    /// anything else the read threw (an <see cref="IOException"/>, a cancellation of the linked token) becomes a
-    /// cancellation for the caller's token, so that nobody above mistakes it for a network failure and retries.
-    /// </summary>
-    static Exception CallerCancelled(Exception e, CancellationToken cancellationToken) =>
-        e is OperationCanceledException cancelled && cancelled.CancellationToken == cancellationToken
-            ? cancelled
-            : new OperationCanceledException("The read was cancelled.", e, cancellationToken);
 
     public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken) =>
         ReadAsync(buffer.AsMemory(offset, count), cancellationToken).AsTask();

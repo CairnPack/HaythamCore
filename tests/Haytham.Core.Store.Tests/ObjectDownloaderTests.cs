@@ -415,6 +415,48 @@ public sealed class ObjectDownloaderTests : IDisposable
         Assert.Empty(_dir.TempEntries());
     }
 
+    [Theory]
+    [InlineData("last attempt")]
+    [InlineData("backoff above the limit")]
+    [InlineData("attempts left")]
+    public async Task Cancelling_while_the_request_is_sent_throws_the_callers_cancellation_even_if_the_handler_throws_an_http_error(
+        string retries)
+    {
+        var store = _dir.Create();
+        var sending = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _http.Respond(HttpMethod.Get, Modrinth, async (_, cancellationToken) =>
+        {
+            sending.TrySetResult();
+            try
+            {
+                await Task.Delay(Timeout.Infinite, cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+            }
+
+            // A custom handler may report the aborted request as a network failure rather than a cancellation.
+            throw new HttpRequestException("connection reset");
+        });
+        var options = retries switch
+        {
+            "last attempt" => Options with { MaxAttemptsPerUrl = 1 },
+            "backoff above the limit" => Options with { MaxRetryAfter = TimeSpan.Zero },
+            _ => Options,
+        };
+        using var cancel = CancellationTokenSource.CreateLinkedTokenSource(Token);
+
+        var obtain = Downloader(store, options).ObtainAsync(Request(Modrinth), cancel.Token);
+        await sending.Task.WaitAsync(Token);
+        await cancel.CancelAsync();
+        var error = await Assert.ThrowsAnyAsync<OperationCanceledException>(() => obtain);
+
+        Assert.Equal(cancel.Token, error.CancellationToken);
+        Assert.Single(_http.Requests);
+        Assert.Empty(_clock.Timers);
+        Assert.Equal(ObjectState.Missing, await store.VerifyAsync(BodySha1, VerifyMode.Full, Token));
+    }
+
     [Fact]
     public async Task A_network_error_while_reading_the_body_is_retried()
     {
