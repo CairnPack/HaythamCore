@@ -393,6 +393,9 @@ public sealed class ObjectDownloaderTests : IDisposable
 
         var obtain = Downloader(store, options).ObtainAsync(Request(Modrinth), cancel.Token);
         await reading.Task.WaitAsync(Token);
+        // Every read starts its own idle timer: the first one returned the first part of the body, so its timer is
+        // already disposed. The timers below are the held read's.
+        Assert.Equal(TimeSpan.FromSeconds(30), await _clock.NextTimerAsync());
         // The body read is held until both have happened, so the read fails with the timer fired and the caller
         // cancelled, in either order.
         if (timerFirst)
@@ -412,7 +415,7 @@ public sealed class ObjectDownloaderTests : IDisposable
 
         Assert.Equal(cancel.Token, error.CancellationToken);
         Assert.Single(_http.Requests);
-        Assert.Equal([TimeSpan.FromSeconds(30)], _clock.Timers);
+        Assert.Equal([TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(30)], _clock.Timers); // one per read, no backoff
         Assert.Empty(_dir.TempEntries());
     }
 
