@@ -31,11 +31,11 @@ static class LockHolders
     public static string DirectoryOf(string lockPath) => lockPath + ".holders";
 
     /// <summary>
-    /// Records the current process as a holder and removes records of processes that have ended. Returns the record
-    /// path, or <see langword="null"/> when it could not be written: a missing record never fails the lock.
+    /// Records the current process as a holder and removes records of processes that have ended.
+    /// Returns the record path, or throws when registration or its cleanup fails.
     /// </summary>
     /// <param name="since">When the lock was taken, shown to whoever waits for it.</param>
-    public static string? Register(string lockPath, ProgramInfo program, string operation, DateTimeOffset since)
+    public static string Register(string lockPath, ProgramInfo program, string operation, DateTimeOffset since)
     {
         var directory = DirectoryOf(lockPath);
         var self = ProcessIdentity.Current;
@@ -51,78 +51,55 @@ static class LockHolders
             Since = since,
         };
 
-        string? temp = null;
+        Directory.CreateDirectory(directory);
+        RemoveEnded(directory);
+        var temp = Path.Combine(directory, $".{Guid.NewGuid():N}.tmp");
+        var ownsTemp = false;
         try
         {
-            Directory.CreateDirectory(directory);
-            RemoveEnded(directory);
-            temp = Path.Combine(directory, $".{Guid.NewGuid():N}.tmp");
             using (var stream = new FileStream(temp, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            {
+                ownsTemp = true;
                 JsonSerializer.Serialize(stream, record, StoreJsonContext.Default.LockHolderRecord);
+            }
             File.Move(temp, path, overwrite: true);
             return path;
         }
-        catch (IOException)
+        catch (Exception registrationError)
         {
-            return null;
-        }
-        catch (UnauthorizedAccessException)
-        {
-            return null;
-        }
-        finally
-        {
-            // After a successful move there is nothing left to delete. Only the file this call created is removed;
-            // a failed cleanup never fails the lock either.
-            if (temp is not null) DeleteQuietly(temp);
+            if (ownsTemp)
+            {
+                try
+                {
+                    File.Delete(temp);
+                }
+                catch (Exception cleanupError)
+                {
+                    throw new AggregateException("Holder registration and temporary file cleanup both failed.",
+                        registrationError, cleanupError);
+                }
+            }
+            throw;
         }
     }
 
-    public static void Unregister(string? recordPath)
-    {
-        if (recordPath is not null) DeleteQuietly(recordPath);
-    }
-
-    static void DeleteQuietly(string path)
-    {
-        try
-        {
-            File.Delete(path);
-        }
-        catch (IOException)
-        {
-        }
-        catch (UnauthorizedAccessException)
-        {
-        }
-    }
+    public static void Unregister(string recordPath) => File.Delete(recordPath);
 
     /// <summary>
-    /// A readable list of the live holders, for example <c>gebinde 0.1.0 (PID 1234), download …</c>. The list is
-    /// extra information on an error that is already being thrown, so a failure to read it never escapes: the text
-    /// then says "an unknown holder" and names the exception type and message that stopped the listing.
+    /// A readable list of the live holders, for example <c>gebinde 0.1.0 (PID 1234), download …</c>.
+    /// No records means an unknown holder; failures to list or read records propagate to the caller.
     /// </summary>
     /// <param name="listRecords">Lists the record files in a holders directory; replaced only by tests.</param>
     public static string Describe(string lockPath, Func<string, IEnumerable<string>>? listRecords = null)
     {
         var holders = new List<string>();
-        string? failure = null;
-        try
+        foreach (var (_, record) in ReadWithPaths(DirectoryOf(lockPath), listRecords ?? ListRecords))
         {
-            foreach (var (_, record) in ReadWithPaths(DirectoryOf(lockPath), listRecords ?? ListRecords))
-            {
-                if (new ProcessIdentity(record.Pid, record.StartTime).IsAlive())
-                    holders.Add($"{record.Program} {record.Version} (PID {record.Pid}), {record.Operation}, since {record.Since:u}");
-            }
-        }
-        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
-        {
-            var reason = e.Message.Split(['\r', '\n'])[0].Trim();
-            failure = $"{e.GetType().Name}: {reason}";
+            if (new ProcessIdentity(record.Pid, record.StartTime).IsAlive())
+                holders.Add($"{record.Program} {record.Version} (PID {record.Pid}), {record.Operation}, since {record.Since:u}");
         }
 
-        var text = holders.Count == 0 ? "an unknown holder" : string.Join("; ", holders);
-        return failure is null ? text : $"{text} (the holder records could not be fully listed: {failure})";
+        return holders.Count == 0 ? "an unknown holder" : string.Join("; ", holders);
     }
 
     static void RemoveEnded(string directory)
@@ -130,41 +107,45 @@ static class LockHolders
         foreach (var (path, record) in ReadWithPaths(directory, ListRecords))
         {
             if (new ProcessIdentity(record.Pid, record.StartTime).IsAlive()) continue;
-            try
-            {
-                File.Delete(path);
-            }
-            catch (IOException)
-            {
-            }
+            File.Delete(path);
         }
     }
 
     static IEnumerable<string> ListRecords(string directory) => Directory.EnumerateFiles(directory, "*.json");
 
     /// <summary>
-    /// Records that cannot be read are skipped: they only ever affect what is shown. Failing to list the directory
-    /// is not skipped; the caller decides what to do with it.
+    /// Missing holder directories have no records. Listing, record parsing and read failures are otherwise errors.
     /// </summary>
     static IEnumerable<(string Path, LockHolderRecord Record)> ReadWithPaths(
         string directory,
         Func<string, IEnumerable<string>> listRecords)
     {
-        if (!Directory.Exists(directory)) yield break;
-        foreach (var path in listRecords(directory))
+        string[] paths;
+        try
         {
-            LockHolderRecord? record;
+            paths = listRecords(directory).ToArray();
+        }
+        catch (DirectoryNotFoundException)
+        {
+            yield break;
+        }
+        foreach (var path in paths)
+        {
+            FileStream stream;
             try
             {
-                using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-                record = JsonSerializer.Deserialize(stream, StoreJsonContext.Default.LockHolderRecord);
+                stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
             }
-            catch (Exception e) when (e is IOException or UnauthorizedAccessException or JsonException)
+            catch (FileNotFoundException)
             {
+                // The holder can unregister after the timeout reader listed its record.
                 continue;
             }
-
-            if (record is { Format: RecordFormat, Pid: > 0 }) yield return (path, record);
+            using var opened = stream;
+            var record = JsonSerializer.Deserialize(stream, StoreJsonContext.Default.LockHolderRecord);
+            if (record is not { Format: RecordFormat, Pid: > 0 })
+                throw new InvalidDataException($"Invalid lock holder record '{path}'.");
+            yield return (path, record);
         }
     }
 }

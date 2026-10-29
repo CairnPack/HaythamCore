@@ -303,6 +303,32 @@ public class ImportAndVerifyTests
         }
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Part_cleanup_failure_is_visible_and_preserves_an_existing_operation_error(bool operationFailed)
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "Deleting an open file only fails on Windows.");
+        using var dir = new TempStoreDirectory();
+        var store = dir.Create();
+        var part = store.Layout.NewPartPath();
+        File.WriteAllBytes(part, Content);
+        using var held = new FileStream(part, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+        var original = operationFailed ? new IOException("import failed") : null;
+
+        var error = Record.Exception(() => ObjectImporter.DeletePart(part, original));
+
+        if (original is null)
+            Assert.IsAssignableFrom<IOException>(error);
+        else
+        {
+            var combined = Assert.IsType<AggregateException>(error);
+            Assert.Equal(2, combined.InnerExceptions.Count);
+            Assert.Same(original, combined.InnerExceptions[0]);
+            Assert.IsAssignableFrom<IOException>(combined.InnerExceptions[1]);
+        }
+    }
+
     sealed class EndlessStream : Stream
     {
         public long BytesRead { get; private set; }

@@ -86,7 +86,7 @@ Store 里凡是“现在几点”和“过了多久”，都问同一个 .NET �
 
 - 公开构造函数有两个：原有的三参数版本 `ObjectDownloader(ContentStore, HttpClient, DownloadOptions)` 用 `TimeProvider.System`；新增的重载 `ObjectDownloader(ContentStore, HttpClient, DownloadOptions, TimeProvider)` 接收调用方的时钟，传 `null` 抛 `ArgumentNullException`。原来 internal 的、收 `delay` 回调的构造函数删掉了。
 - 用重载而不是给原有签名加一个可选参数：Store 作为独立的 NuGet 包发布，加可选参数等于换掉原来的方法签名，按旧版本编译的调用方升级后会在运行时找不到构造函数；重载让源代码和已编译的调用都不受影响。
-- 不经过 `TimeProvider` 的时间：`ProcessIdentity` 读的是进程的启动时间，验证记录的 `FileStamp` 读的是文件的修改时间。它们是系统记下的时间点，要和进程表、文件系统里的值比较，不是“现在”，所以 never 换成注入的时钟。`ContentStore`、`ObjectImporter`、`ObjectVerifier` 不读时钟。`HttpClient.Timeout` 由调用方传入的 `HttpClient` 自己计时，不归 Store 管。
+- 不经过 `TimeProvider` 的时间：`ProcessIdentity` 读的是进程的启动时间，验证记录的 `FileStamp` 读的是文件的修改时间。它们是系统记下的时间点，要和进程表、文件系统里的值比较，不是“现在”，所以 never 换成注入的时钟。`ObjectVerifier` 不读时钟；`ContentStore` 为 `ObjectImporter` 注入独立的修复等待时钟，公开打开入口使用系统时钟，详见[修复锁](../bug-fix/2026-10-27-store-repair-lock.md)。`HttpClient.Timeout` 由调用方传入的 `HttpClient` 自己计时，不归 Store 管。
 - 构造函数注入的其余结构不变：`ContentStore` 仍然自己创建 `ObjectVerifier` 与 `ObjectImporter`。它们只在仓库内部组合，调用方没有替换它们的需要。
 
 为什么要注入时钟，而不是只注入“等待”：原来的 `delay` 回调只能替换“等”这个动作，`FileLock` 用 `Stopwatch` 算“已经等了多久”、`Retry-After` 的日期用 `DateTimeOffset.UtcNow`、空闲超时用 `CancelAfter` 的系统计时器，这三处测试都控制不了，等锁超时与空闲超时的测试只能真的等。`TimeProvider` 同时提供计时器、时间戳和当前时间，测试换成假时钟后，“等了多久”和“等多久”由同一个时钟决定，测试不再依赖真实时间。
@@ -116,8 +116,8 @@ Store 里凡是“现在几点”和“过了多久”，都问同一个 .NET �
 - 拿到锁后，在 `<锁文件>.holders/<pid>-<启动时间的 Unix 毫秒>.json` 原子写入 `{format, program, version, pid, startTime, operation, since}`；释放时先删记录、再放锁，免得有人在锁空出来以后读到它。
 - `program` 与 `version` 来自 `ContentStore.Open` 的 `ProgramInfo` 参数，不传时用进程名和 `unknown`。
 - 写入时顺手删掉已结束进程的记录。“已结束”按 PID 加启动时间判断（允许 ±2 秒误差）；系统不肯回答（拒绝访问）时当作还活着。
-- 记录只用来显示，never 用来判断锁是否被持有。写不进去时不影响拿锁，读不懂的记录跳过。
-- 写记录用的临时文件在失败时也会尝试删除；列目录失败时 `LockTimeout` 的消息显示“未知占用者”和失败原因，不让异常顶替超时错误（见[四处小缺陷](../bug-fix/2026-10-27-store-small-fixes.md)）。
+- 记录不代替系统锁，但登记成功是本次获取 API 成功的一部分：写入或清理失败就终止获取、释放句柄并抛错；注销失败仍在 `finally` 释放句柄。原“写不进去也算拿锁成功、读不懂就跳过”的降级由[显式失败决定](../simplification/2026-10-29-store-exclusive-writers-and-explicit-failures.md)取代。
+- 登记失败只清理本次创建的临时文件，清理失败也显式传播。`Describe` 的实际枚举、读取和解析错误不静默跳过；`FileLock` 在超时错误里保留它们的原始异常，仍以 `LockTimeout` 为主错误。没有记录或打开前正常注销消失不算读取故障，具体边界见[显式失败决定](../simplification/2026-10-29-store-exclusive-writers-and-explicit-failures.md)。
 - 现在的文件名一个进程只有一个；独占锁不会出现同一进程的两条记录。仓库的共享锁落地时，同一进程可能同时有多个会话，文件名要另加区分。
 
 ### 文件锁被关掉时仓库只读

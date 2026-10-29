@@ -13,9 +13,9 @@ sealed class FileLock : IDisposable
     static readonly TimeSpan MaxBackoff = TimeSpan.FromSeconds(1);
 
     readonly FileStream _handle;
-    readonly string? _holderRecord;
+    readonly string _holderRecord;
 
-    FileLock(FileStream handle, string? holderRecord)
+    FileLock(FileStream handle, string holderRecord)
     {
         _handle = handle;
         _holderRecord = holderRecord;
@@ -49,24 +49,53 @@ sealed class FileLock : IDisposable
             {
                 var elapsed = timeProvider.GetElapsedTime(started);
                 if (elapsed >= timeout)
-                    throw new StoreException(
-                        StoreError.LockTimeout,
-                        $"Waited {timeout} for the lock '{path}' to {operation}; it is held by {LockHolders.Describe(path)}.",
-                        e);
+                    throw TimedOut(path, operation, timeout, e);
                 await Task.Delay(Min(backoff, timeout - elapsed), timeProvider, cancellationToken).ConfigureAwait(false);
                 backoff = Min(backoff * 2, MaxBackoff);
                 continue;
             }
 
-            return new FileLock(handle, LockHolders.Register(path, program, operation, timeProvider.GetUtcNow()));
+            try
+            {
+                return new FileLock(handle, LockHolders.Register(path, program, operation, timeProvider.GetUtcNow()));
+            }
+            catch
+            {
+                handle.Dispose();
+                throw;
+            }
         }
     }
 
     public void Dispose()
     {
-        // Remove the record first, so nobody reads it after the lock is free.
-        LockHolders.Unregister(_holderRecord);
-        _handle.Dispose();
+        try
+        {
+            // Remove the record first, so nobody reads it after the lock is free.
+            LockHolders.Unregister(_holderRecord);
+        }
+        finally
+        {
+            _handle.Dispose();
+        }
+    }
+
+    static StoreException TimedOut(string path, string operation, TimeSpan timeout, IOException contention)
+    {
+        string description;
+        Exception cause = contention;
+        try
+        {
+            description = LockHolders.Describe(path);
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or System.Text.Json.JsonException)
+        {
+            description = $"an unknown holder (the holder records could not be read: {error.GetType().Name}: {error.Message})";
+            cause = new AggregateException(contention, error);
+        }
+
+        return new StoreException(StoreError.LockTimeout,
+            $"Waited {timeout} for the lock '{path}' to {operation}; it is held by {description}.", cause);
     }
 
     /// <summary>

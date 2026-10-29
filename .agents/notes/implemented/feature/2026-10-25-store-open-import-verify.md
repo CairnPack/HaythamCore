@@ -6,7 +6,7 @@ Status: implemented
 
 `Haytham.Core.Store` 是安装、启动、GC 共同的底层：它们都要先能打开仓库、把文件放进 `objects/`、判断一个对象好不好。规则散在 Haytham Launcher repo 的开发者指南（§4.1 寻址、§4.2 只读与 `.part`、§4.9 原子写入、§4.10 往安全的方向失败、§4.12 仓库目录）和业务语义工作稿（E1 寻址与自愈、E3 纳入、D6 完好性检查、E10 格式版本）里，还没有任何代码。
 
-本批只做不联网、不加锁就能成立的部分，让后面的下载（E2）、锁、GC、放置有东西可接。
+本批提供不联网的纳入与验证，让下载（E2）、锁、GC、放置有东西可接。坏对象修复的并发保护由[修复锁](../bug-fix/2026-10-27-store-repair-lock.md)补齐。
 
 ## Decision
 
@@ -32,7 +32,7 @@ Status: implemented
 ```
 
 - `format` 是仓库的格式版本，`minWriterFormat` 是能安全写入这个仓库的最低程序格式版本，`storeId` 是仓库身份，第一次创建时生成，之后不变。
-- 本程序支持格式 1。`minWriterFormat` 大于 1 时，仓库以只读方式打开：`IsReadOnly` 为真，纳入一律抛 `StoreError.ReadOnly`，也不创建 `objects/`、`tmp/`。这就是 E10 的“遇到比自己新的格式只读，绝不写入”。
+- 本程序支持格式 1。`minWriterFormat>1` 时只读打开；`IsReadOnly` 为真时纳入抛 `StoreError.ReadOnly`，不创建 `objects/`、`tmp/`。当前无发布版，新增修复锁不自行提升格式；版本步进需要用户明确提出前代不兼容需求并二次确认，见[专属写入者与显式失败](../simplification/2026-10-29-store-exclusive-writers-and-explicit-failures.md)。
 - `format.json` 读不懂（不是 JSON、缺字段、`format` 小于 1、`storeId` 为空）时抛 `StoreError.FormatUnreadable`，never 重写它（§4.10）。
 - `format.json` 只在创建时写一次，之后不改，所以不需要保留未知字段。
 
@@ -52,16 +52,16 @@ Status: implemented
 
 第 1 步由内部方法 `ObjectImporter.FindExistingAsync` 完成：已有对象全部相符时返回 `AlreadyPresent`，不符时抛 `ContentMismatch`，没有完好的对象时返回空。期望本身的格式（sha512 的长度与字符、大小不能是负数）由 `ObjectImporter.Validate` 检查。下载侧在加锁前后判断“是否已经有了”时复用这两个方法，所以下载与纳入对同样的输入给出同样的回答，规则只在一处（理由见[下载笔记](2026-10-25-store-obtain-and-download-lock.md)）。
 
-`.part` 是本次纳入自己的文件，从没被链接过，所以失败时可以先清掉只读再删除；删不掉就留给以后的临时目录清理（§4.4 的“超过一天的 `object-*.part`”）。
+`.part` 是本次纳入自己创建的文件，从没被链接过，所以清理时可以先清掉只读再删除；正常发布后文件已经移走不算清理失败。清理 I/O 或权限错误显式传播，若操作也失败则保留两份错误，见[显式失败决定](../simplification/2026-10-29-store-exclusive-writers-and-explicit-failures.md)。
 
 ### 坏对象
 
-E1 要求坏对象由下一次纳入原子替换，而且 never 解除只读保护。Windows 上覆盖式移动遇到只读的目标会失败，所以替换分两步：
+坏对象由下一次纳入替换，而且 never 解除只读保护。先取修复锁并完整重检，只有仍损坏才隔离。Windows 上覆盖式移动遇到只读目标会失败，所以替换分两步：
 
 1. 把坏对象改名移到 `tmp/corrupt-<sha1>-<guid>`。改名不碰文件属性，实例里指向它的只读共享仍然指向同一份（坏的）数据，下一次 install 会按“过期”或“被改动”处理。
 2. 再把新的 `.part` 移进 `objects/`。
 
-Windows 上，坏对象若被别的句柄打开而没有共享删除（游戏的 JVM 打开 jar 大概就是这样；实例里的硬链接指向同一个文件，所以被打开也算），改名会失败。这时抛 `StoreError.ObjectInUse`，内部异常保留原始的 `IOException`，调用方（以及把错误翻译成稳定键的原生库）可以等占用方关闭后重试。目标已经不存在则仍视为别的纳入先移走了它，不算错误。
+Windows 上，坏对象若被别的句柄打开而没有共享删除，改名会因共享冲突失败，这时抛 `StoreError.ObjectInUse` 并保留原始异常。其他文件系统错误显式传播；共同修复锁内目标异常消失不再当正常修复竞争吞掉。
 
 两步之间这个对象暂时不存在，仍满足“对象要么完整、要么不存在”。移走的坏对象本批不删除：删除只读文件的目录项要用 Windows 的 `FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE`（§4.2 的 C# 注意），和临时目录清理一起做。返回值是 `ReplacedCorrupt`。
 
@@ -96,7 +96,7 @@ Windows 上，坏对象若被别的句柄打开而没有共享删除（游戏的
 
 - 收益：仓库目录、`format.json`、`.part` 规则、只读与自愈都有了代码和测试，下载、GC、放置可以直接建在 `ContentStore` 上。
 - 收益：`StoreError` 让原生库能把错误翻译成稳定的错误键，不必解析异常消息。
-- 代价：纳入本身不加锁。两个进程同时纳入同一个对象仍然正确（不覆盖的移动加上完整验证），但会各写一份 `.part`、各算一次哈希；“同一个文件只下载一次”由[第二批](2026-10-25-store-obtain-and-download-lock.md)的下载锁保证，只管下载，不管直接纳入。
+- 代价：正常纳入不加锁，新增对象的竞争由非覆盖移动与完整验证处理；坏对象修复由[共同修复锁](../bug-fix/2026-10-27-store-repair-lock.md)保护。并发纳入仍可能各写一份 `.part`、各算一次哈希；“同一个文件只下载一次”由[第二批](2026-10-25-store-obtain-and-download-lock.md)的下载锁保证。
 - 代价：没有仓库锁，所以本批的纳入还不能和 GC 安全并存；GC 落地时纳入要补上共享锁。
 - 代价：`tmp/corrupt-*` 与残留的 `.part` 只增不减，直到临时目录清理落地。
 - 代价：纳入文件一律复制，不试克隆，大文件同卷纳入也会多占一份写入时间。

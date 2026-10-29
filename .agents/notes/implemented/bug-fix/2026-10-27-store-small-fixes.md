@@ -13,6 +13,8 @@ Status: implemented
 
 ## Decision
 
+本篇空目录判断与并发创建的决定仍有效。占用者显示和清理的降级选择被[专属写入者与显式失败](../simplification/2026-10-29-store-exclusive-writers-and-explicit-failures.md)部分取代；以下维护当前事实，历史理由保留在备选方案中。
+
 ### 空目录的判断
 
 - `ContentStore` 判断目录是否为空时，只忽略名字完全是 `.format-<32 位小写十六进制>.tmp` 的普通文件，也就是 `StoreLayout.NewFormatTempPath` 生成的那种名字。判断放在 `StoreLayout.IsFormatTempName`，格式与生成它的地方放在同一个类里。
@@ -28,16 +30,16 @@ Status: implemented
 
 ### 占用者的显示
 
-- `LockHolders.Describe` 不再让文件系统异常逸出。列目录或迭代中出现 `IOException`、`UnauthorizedAccessException` 时，已读到的活着的占用者照常显示；一个都没有就显示 `an unknown holder`；两种情况都在后面加一段 `(the holder records could not be fully listed: <异常类型>: <消息第一行>)`。这段文字进入 `LockTimeout` 的消息，是库里唯一的诊断出口：库目前没有日志设施。
-- 主错误 `LockTimeout` 不受影响：`FileLock.AcquireExclusiveAsync` 拼消息时调用的仍是 `Describe`，它不再抛出。
+- `LockHolders.Describe` 的实际枚举、读取和 JSON 解析失败显式抛出。没有记录才返回 `an unknown holder`，不把实际故障当成没有记录。
+- `FileLock` 在等待超时时保留主错误 `LockTimeout`，将描述读取失败与原锁冲突一起放入内部的 `AggregateException`，消息也说明读取失败，不用异常文本代替原始错误。
 - `Describe` 有一个 `internal` 的可选参数 `listRecords`，只有测试用它换掉“列目录”这一步，以便在不依赖操作系统权限的情况下确定性地制造枚举失败。它不是公开接口。
-- 目录不存在不算故障：它只表示没有人登记过，仍显示 `an unknown holder`，不带失败说明。
+- 占用者目录不存在不算显示故障；列出的记录在打开前被正常注销时也可跳过，仅捕获打开操作的 `FileNotFoundException`。后续读取和解析错误继续传播。
 
 ### 临时文件的清理
 
-- `LockHolders.Register` 在 `finally` 里尝试删除本次调用创建的临时文件，写成功并改名后文件已不存在，删除不起作用。清理失败（`IOException`、`UnauthorizedAccessException`）被吞掉，不会让拿锁失败；这是已有约定“记录写不进去不影响拿锁”的一部分。
+- `LockHolders.Register` 返回非空路径。成功时临时文件已改名为记录；失败时清理本次创建的临时文件，并传播登记错误。清理也失败则局部聚合两份错误，不把失败变成拿锁成功。
 - 只删本次创建的那一个文件，不扫描删除 `.holders/` 里别的未知文件，也不清理别的进程的临时文件。
-- 清理失败时没有任何提示。这与 `ObjectImporter.DeletePart` 一致；它只会留下一个无害的小文件，不影响锁，也没有别处可读的诊断出口。
+- 注销、旧记录删除和临时文件清理失败都显式传播。登记失败释放刚打开的句柄，注销失败在 `finally` 释放；资源释放不代表业务继续成功。`ObjectImporter.DeletePart` 同样不再吞清理错误。
 
 ## Alternatives considered
 
@@ -45,17 +47,17 @@ Status: implemented
 - **用 `File.Exists` 判断是否普通文件** — 写法简单。不采用，因为它与枚举之间有空档：临时文件被先到者改名走，条目会被当成“别的内容”。用枚举返回的类型没有这个空档。
 - **并发创建时在 `Open` 里重试整个流程** — 能覆盖更多交错。不采用，因为只有“抛错之前再看一次 `format.json`”这一处有问题，多看一次就够了，重试会让其余路径也变得难以推理。
 - **给 `Open` 加测试钩子来注入交错** — 能覆盖第一次检查本身。不采用，因为要在生产代码里加只为测试存在的委托；拆出 `internal` 方法已经能让测试确定性地覆盖修复的那一步。
-- **枚举失败时让异常照常抛出** — 失败能立刻被看到。不采用，因为占用者只是附加显示，丢掉 `LockTimeout` 会让调用方分不清“等锁超时”和“文件系统坏了”。
+- **让占用者读取故障顶替超时主错误** — 失败能立刻被看到。原先担心丢掉 `LockTimeout` 后调用方分不清等锁超时与文件系统故障，因此选择文本降级；后续[显式失败决定](../simplification/2026-10-29-store-exclusive-writers-and-explicit-failures.md)保留同一个主错误，并附带原始异常，不再在 `Describe` 内吞错。
 - **启动时扫描并删除 `.holders/` 里所有未知文件** — 能清掉历史遗留。不采用：占用者记录目录里只有我们自己写的文件，但扫描删除会扩大清理的范围，别的进程正在写的临时文件也可能被误删。
 
 ## Consequences
 
 - **好处**：用户目录里恰好有 `.format-` 开头的内容时不会被当成空目录；并发创建的两个程序不再因为窗口很窄的交错而失败；拿锁超时的错误种类稳定，文件系统故障会写进消息里；占用者记录目录不再积累孤立的临时文件。
 - **副作用**：`.format-<32 位十六进制>.tmp` 只在小写时被忽略。`NewFormatTempPath` 只生成小写，所以正常情况不受影响；别的程序留下的大写同形文件会被当成内容。
-- **已知上限**：`Open` 的第一次检查本身没有测试覆盖，只测了“第一次检查之后”的那一段；这是为了不在生产代码里放测试钩子。占用者记录的临时文件清理失败时没有任何提示。
+- **已知上限**：`Open` 的第一次检查本身没有测试覆盖，只测了“第一次检查之后”的那一段；这是为了不在生产代码里放测试钩子。
 
 ## Verification
 
 - `tests/Haytham.Core.Store.Tests/StoreOpenTests.cs`：`.format-` 开头的条目哪些被拒绝、哪些被忽略；`CreateOrJoin` 对另一方写好的 `format.json`（格式 2、指定的 `storeId`）读出同一份内容且不改写文件，对损坏的 `format.json` 仍抛 `FormatUnreadable`，对没有 `format.json` 的非空目录仍抛 `NotAStore`。
-- `tests/Haytham.Core.Store.Tests/FileLockTests.cs`：占用者目录被删后超时仍是 `LockTimeout`；列目录失败时 `Describe` 返回“未知占用者”加失败原因，迭代中途失败保留已读到的占用者；记录的目标名被目录占住时 `Register` 返回 `null`、没有遗留临时文件、拿锁照常成功。
+- `tests/Haytham.Core.Store.Tests/FileLockTests.cs`：占用者目录被删后超时仍是 `LockTimeout`，注销故障显式可见；列目录或迭代中途失败由 `Describe` 原样抛出；登记与注销失败不泄漏系统锁，登记目标被目录占用时清理自己的临时文件并报告失败。
 - 运行 `dotnet test` 时看上面两个文件。
