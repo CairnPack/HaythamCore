@@ -2,6 +2,8 @@
 
 > SKILL §6 的细则。接入 CI 时对照；本地简单使用时不用读。
 
+校验通过只说明目录、格式、链接及归档约束符合规则，不证明用户已经批准，也不证明实现已经完成。这两件事分别依据明确的确认记录和实际实现证据，由写笔记的人核对；不添加关键词扫描来代替判断。
+
 ## 检查脚本（都是 TypeScript，不增加依赖，都可以用 `npx tsx` 单独运行）
 
 1. **`verify-agent-note-tree`**（`scripts/agent-note-tree.ts` + `scripts/verify-agent-note-tree.ts`）

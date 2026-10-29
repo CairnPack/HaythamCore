@@ -74,12 +74,13 @@ public class FileLockTests
     }
 
     [Fact]
-    public async Task A_missing_holders_directory_still_gives_lock_timeout()
+    public async Task A_missing_holders_directory_gives_lock_timeout_and_reports_unregistration_failure()
     {
         using var dir = new TempStoreDirectory();
         var path = Path.Combine(dir.Path, "locks", "download", "abc");
 
-        using (await Acquire(path, TimeSpan.FromSeconds(1)))
+        var held = await Acquire(path, TimeSpan.FromSeconds(1));
+        try
         {
             Directory.Delete(path + ".holders", recursive: true);
             var waiting = Acquire(path, TimeSpan.FromMilliseconds(200));
@@ -90,26 +91,33 @@ public class FileLockTests
 
             Assert.Equal(StoreError.LockTimeout, error.Error);
             Assert.Contains("an unknown holder", error.Message);
+            Assert.Throws<DirectoryNotFoundException>(held.Dispose);
         }
+        finally
+        {
+            Directory.CreateDirectory(path + ".holders");
+            held.Dispose();
+        }
+        using var again = await _clock.WithWatchdogAsync(Acquire(path, TimeSpan.FromSeconds(1)));
     }
 
     [Theory]
     [InlineData(typeof(IOException))]
     [InlineData(typeof(UnauthorizedAccessException))]
-    public async Task A_failure_to_list_the_holder_records_gives_an_unknown_holder_and_says_why(Type failure)
+    public async Task A_failure_to_list_the_holder_records_propagates(Type failure)
     {
         using var dir = new TempStoreDirectory();
         var path = Path.Combine(dir.Path, "locks", "download", "abc");
         using var held = await Acquire(path, TimeSpan.FromSeconds(1));
 
-        var text = LockHolders.Describe(path, _ => throw (Exception)Activator.CreateInstance(failure, "listing broke")!);
+        var original = (Exception)Activator.CreateInstance(failure, "listing broke")!;
+        var error = Record.Exception(() => LockHolders.Describe(path, _ => throw original));
 
-        Assert.Contains("an unknown holder", text);
-        Assert.Contains($"{failure.Name}: listing broke", text);
+        Assert.Same(original, error);
     }
 
     [Fact]
-    public async Task A_failure_in_the_middle_of_listing_keeps_the_holders_already_read()
+    public async Task A_failure_in_the_middle_of_listing_propagates()
     {
         using var dir = new TempStoreDirectory();
         var path = Path.Combine(dir.Path, "locks", "download", "abc");
@@ -121,14 +129,13 @@ public class FileLockTests
             throw new IOException("listing broke");
         }
 
-        var text = LockHolders.Describe(path, ListThenFail);
+        var error = Assert.Throws<IOException>(() => LockHolders.Describe(path, ListThenFail));
 
-        Assert.Contains($"store-tests 1.0 (PID {Environment.ProcessId})", text);
-        Assert.Contains("IOException: listing broke", text);
+        Assert.Equal("listing broke", error.Message);
     }
 
     [Fact]
-    public async Task A_record_that_cannot_be_written_leaves_no_temporary_file_and_does_not_fail_the_lock()
+    public async Task Registration_failure_is_reported_and_releases_the_system_lock()
     {
         using var dir = new TempStoreDirectory();
         var path = Path.Combine(dir.Path, "locks", "download", "abc");
@@ -139,13 +146,68 @@ public class FileLockTests
         var blocker = Directory.CreateDirectory(
             Path.Combine(holders, $"{self.Pid}-{self.StartTime.ToUnixTimeMilliseconds()}.json")).FullName;
 
-        Assert.Null(LockHolders.Register(path, Program, "test", _clock.GetUtcNow()));
-        using (await Acquire(path, TimeSpan.FromSeconds(1)))
+        var error = await Record.ExceptionAsync(async () =>
         {
-        }
+            using var unexpected = await Acquire(path, TimeSpan.FromSeconds(1));
+        });
 
+        Assert.True(error is IOException or UnauthorizedAccessException, $"Expected a registration error, got {error}.");
         Assert.Empty(Directory.GetFiles(holders));
         Assert.True(Directory.Exists(blocker));
+        Directory.Delete(blocker);
+        using var again = await _clock.WithWatchdogAsync(Acquire(path, TimeSpan.FromSeconds(1)));
+    }
+
+    [Fact]
+    public async Task Unregistration_failure_is_reported_and_releases_the_system_lock()
+    {
+        using var dir = new TempStoreDirectory();
+        var path = Path.Combine(dir.Path, "locks", "download", "abc");
+        using var held = await Acquire(path, TimeSpan.FromSeconds(1));
+        var record = Assert.Single(Directory.GetFiles(path + ".holders", "*.json"));
+        File.Delete(record);
+        Directory.CreateDirectory(record);
+
+        var error = Record.Exception(held.Dispose);
+
+        Assert.True(error is IOException or UnauthorizedAccessException, $"Expected an unregistration error, got {error}.");
+        Directory.Delete(record);
+        using var again = await _clock.WithWatchdogAsync(Acquire(path, TimeSpan.FromSeconds(1)));
+    }
+
+    [Fact]
+    public async Task An_unreadable_existing_record_prevents_registration_and_releases_the_system_lock()
+    {
+        using var dir = new TempStoreDirectory();
+        var path = Path.Combine(dir.Path, "locks", "download", "abc");
+        var holders = Directory.CreateDirectory(path + ".holders").FullName;
+        var broken = Path.Combine(holders, "broken.json");
+        File.WriteAllText(broken, "{");
+
+        await Assert.ThrowsAsync<JsonException>(() => Acquire(path, TimeSpan.FromSeconds(1)));
+
+        Assert.Equal([broken], Directory.GetFiles(holders));
+        File.Delete(broken);
+        using var again = await _clock.WithWatchdogAsync(Acquire(path, TimeSpan.FromSeconds(1)));
+    }
+
+    [Fact]
+    public async Task A_lock_timeout_preserves_the_record_read_error()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "The holder record is blocked using Windows file sharing.");
+        using var dir = new TempStoreDirectory();
+        var path = Path.Combine(dir.Path, "locks", "download", "abc");
+        using var held = await Acquire(path, TimeSpan.FromSeconds(1));
+        var record = Assert.Single(Directory.GetFiles(path + ".holders", "*.json"));
+        using var unreadable = new FileStream(record, FileMode.Open, FileAccess.Read, FileShare.None);
+
+        var error = await Assert.ThrowsAsync<StoreException>(() => Acquire(path, TimeSpan.Zero));
+
+        Assert.Equal(StoreError.LockTimeout, error.Error);
+        Assert.Contains("the holder records could not be read", error.Message);
+        var causes = Assert.IsType<AggregateException>(error.InnerException);
+        Assert.Equal(2, causes.InnerExceptions.Count);
+        Assert.All(causes.InnerExceptions, e => Assert.IsAssignableFrom<IOException>(e));
     }
 
     [Fact]

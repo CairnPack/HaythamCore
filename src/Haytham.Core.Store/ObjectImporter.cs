@@ -5,11 +5,14 @@ namespace Haytham.Core.Store;
 /// expected, make it read-only, then move it in without overwriting. An object therefore is either complete and
 /// read-only or absent, and its read-only flag is never cleared, not even to replace a corrupt copy.
 /// </summary>
-sealed class ObjectImporter(StoreLayout layout, ObjectVerifier verifier, VerificationRecords records)
+sealed class ObjectImporter(
+    StoreLayout layout, ObjectVerifier verifier, VerificationRecords records, ProgramInfo program, TimeProvider timeProvider)
 {
     const int PublishAttempts = 3;
+    static readonly TimeSpan RepairLockTimeout = TimeSpan.FromMinutes(2);
 
-    public async Task<ImportResult> ImportAsync(Stream content, ExpectedContent? expected, CancellationToken cancellationToken)
+    public async Task<ImportResult> ImportAsync(
+        Stream content, ExpectedContent? expected, CancellationToken cancellationToken, string source = "import")
     {
         var expectedSha512 = Validate(expected, nameof(expected));
         if (expected is not null
@@ -18,6 +21,8 @@ sealed class ObjectImporter(StoreLayout layout, ObjectVerifier verifier, Verific
 
         Directory.CreateDirectory(layout.TempDirectory);
         var part = layout.NewPartPath();
+        var ownsPart = false;
+        Exception? operationError = null;
         try
         {
             HashedContent hashed;
@@ -28,6 +33,7 @@ sealed class ObjectImporter(StoreLayout layout, ObjectVerifier verifier, Verific
                 FileShare.None,
                 bufferSize: 0,
                 FileOptions.Asynchronous);
+            ownsPart = true;
             await using (stream.ConfigureAwait(false))
             {
                 hashed = await ContentHasher.CopyAndHashAsync(
@@ -42,12 +48,17 @@ sealed class ObjectImporter(StoreLayout layout, ObjectVerifier verifier, Verific
 
             CheckExpected(expected, expectedSha512, hashed);
             File.SetAttributes(part, File.GetAttributes(part) | FileAttributes.ReadOnly);
-            var outcome = await PublishAsync(part, hashed.Sha1, cancellationToken).ConfigureAwait(false);
+            var outcome = await PublishAsync(part, hashed.Sha1, source, cancellationToken).ConfigureAwait(false);
             return new ImportResult(hashed.Sha1, hashed.Size, outcome);
+        }
+        catch (Exception error)
+        {
+            operationError = error;
+            throw;
         }
         finally
         {
-            DeletePart(part);
+            if (ownsPart) DeletePart(part, operationError);
         }
     }
 
@@ -126,37 +137,68 @@ sealed class ObjectImporter(StoreLayout layout, ObjectVerifier verifier, Verific
         }
     }
 
-    async Task<ImportOutcome> PublishAsync(string part, Sha1 sha1, CancellationToken cancellationToken)
+    /// <summary>Publishes a complete, verified, read-only part.</summary>
+    async Task<ImportOutcome> PublishAsync(string part, Sha1 sha1, string source, CancellationToken cancellationToken)
     {
         var target = layout.ObjectPath(sha1);
         Directory.CreateDirectory(Path.GetDirectoryName(target)!);
-        var replaced = false;
         for (var attempt = 0; attempt < PublishAttempts; attempt++)
         {
-            try
+            cancellationToken.ThrowIfCancellationRequested();
+            if (TryPublish(part, target, sha1)) return ImportOutcome.Added;
+            switch (await verifier.VerifyAsync(sha1, VerifyMode.Full, cancellationToken).ConfigureAwait(false))
             {
-                File.Move(part, target, overwrite: false);
-                // The first fast verify in this process then needs no rehash.
-                records.Remember(sha1, FileStamp.Of(new FileInfo(target)));
-                return replaced ? ImportOutcome.ReplacedCorrupt : ImportOutcome.Added;
-            }
-            catch (IOException) when (File.Exists(target))
-            {
-                // Someone else's object, or an old one: only a full hash can tell whether to keep it.
-                switch (await verifier.VerifyAsync(sha1, VerifyMode.Full, cancellationToken).ConfigureAwait(false))
-                {
-                    case ObjectState.Valid:
-                        return ImportOutcome.AlreadyPresent;
-                    case ObjectState.Corrupt:
-                        MoveAside(target, sha1);
-                        replaced = true;
-                        break;
-                }
+                case ObjectState.Valid:
+                    return ImportOutcome.AlreadyPresent;
+                case ObjectState.Corrupt:
+                    return await RepairAsync(part, sha1, source, cancellationToken).ConfigureAwait(false);
             }
         }
 
-        throw new IOException($"Could not move a verified object into '{target}' after {PublishAttempts} attempts.");
+        throw PublishFailed(target);
     }
+
+    /// <summary>Only prepared, verified content enters this leaf lock; no network or other lock is acquired here.</summary>
+    async Task<ImportOutcome> RepairAsync(string part, Sha1 sha1, string source, CancellationToken cancellationToken)
+    {
+        using var held = await FileLock.AcquireExclusiveAsync(
+            layout.RepairLockPath(sha1), program, $"repair {sha1} ({source})",
+            RepairLockTimeout, timeProvider, cancellationToken).ConfigureAwait(false);
+        // The pre-lock verdict may describe a file another repair has already replaced.
+        var state = await verifier.VerifyAsync(sha1, VerifyMode.Full, cancellationToken).ConfigureAwait(false);
+        if (state == ObjectState.Valid) return ImportOutcome.AlreadyPresent;
+        var target = layout.ObjectPath(sha1);
+        if (state == ObjectState.Corrupt) MoveAside(target, sha1);
+        cancellationToken.ThrowIfCancellationRequested();
+        // A normal import can publish first during the gap; every writer verifies its content before publishing.
+        var added = TryPublish(part, target, sha1);
+        if (state == ObjectState.Corrupt) return ImportOutcome.ReplacedCorrupt;
+        return added ? ImportOutcome.Added : ImportOutcome.AlreadyPresent;
+    }
+
+    bool TryPublish(string part, string target, Sha1 sha1)
+    {
+        try
+        {
+            File.Move(part, target, overwrite: false);
+        }
+        catch (IOException e) when (IsTargetCollision(e))
+        {
+            return false;
+        }
+
+        // These failures must propagate; only the move itself can lose a publication race.
+        records.Remember(sha1, FileStamp.Of(new FileInfo(target)));
+        return true;
+    }
+
+    static IOException PublishFailed(string target) =>
+        new($"Could not move a verified object into '{target}' after {PublishAttempts} attempts.");
+
+    static bool IsTargetCollision(IOException error) =>
+        OperatingSystem.IsWindows()
+            ? (error.HResult & 0xFFFF) is 80 or 183 // ERROR_FILE_EXISTS, ERROR_ALREADY_EXISTS.
+            : error.HResult == 17; // EEXIST, reported as raw errno by .NET on POSIX.
 
     /// <summary>
     /// Renames a corrupt object into <c>tmp/</c>. A rename leaves the read-only flag alone, so hard links in
@@ -169,11 +211,7 @@ sealed class ObjectImporter(StoreLayout layout, ObjectVerifier verifier, Verific
         {
             File.Move(target, layout.NewCorruptPath(sha1), overwrite: false);
         }
-        catch (FileNotFoundException)
-        {
-            // Another import moved it first.
-        }
-        catch (IOException e) when (File.Exists(target))
+        catch (IOException e) when (OperatingSystem.IsWindows() && (e.HResult & 0xFFFF) is 32 or 33)
         {
             // On Windows a handle opened without delete sharing, a running game's jar for one, blocks the rename.
             throw new StoreException(
@@ -198,22 +236,26 @@ sealed class ObjectImporter(StoreLayout layout, ObjectVerifier verifier, Verific
         new(StoreError.ContentMismatch, $"The content does not match: {detail}.");
 
     /// <summary>
-    /// The part file belongs to this import and was never linked, so clearing its read-only flag is safe. A part
-    /// that cannot be deleted now is left for temp directory cleanup.
+    /// Only the part created by this import is cleaned up. A successful publication has already moved it away.
+    /// Cleanup failures are reported, together with the import failure when both fail.
     /// </summary>
-    static void DeletePart(string part)
+    internal static void DeletePart(string part, Exception? operationError)
     {
         try
         {
-            if (!File.Exists(part)) return;
-            File.SetAttributes(part, FileAttributes.Normal);
+            try
+            {
+                File.SetAttributes(part, FileAttributes.Normal);
+            }
+            catch (FileNotFoundException)
+            {
+                return;
+            }
             File.Delete(part);
         }
-        catch (IOException)
+        catch (Exception cleanupError) when (operationError is not null)
         {
-        }
-        catch (UnauthorizedAccessException)
-        {
+            throw new AggregateException("Import and part cleanup both failed.", operationError, cleanupError);
         }
     }
 }

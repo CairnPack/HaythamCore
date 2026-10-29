@@ -17,7 +17,7 @@ public sealed class ContentStore
 {
     readonly string? _readOnlyReason;
 
-    ContentStore(StoreLayout layout, StoreFormatFile format, ProgramInfo program)
+    internal ContentStore(StoreLayout layout, StoreFormatFile format, ProgramInfo program, TimeProvider timeProvider)
     {
         Layout = layout;
         Format = format.Format;
@@ -26,7 +26,7 @@ public sealed class ContentStore
         _readOnlyReason = ReadOnlyReason(format);
         var records = new VerificationRecords();
         Verifier = new ObjectVerifier(layout, records);
-        Importer = new ObjectImporter(layout, Verifier, records);
+        Importer = new ObjectImporter(layout, Verifier, records, program, timeProvider);
     }
 
     public string Root => Layout.Root;
@@ -37,8 +37,8 @@ public sealed class ContentStore
     public int Format { get; }
 
     /// <summary>
-    /// True when this program must only read the store: a newer program format wrote it, or file locking is
-    /// switched off in this process so locks would silently do nothing.
+    /// True when the store requires a newer writer, or file
+    /// locking is switched off in this process so locks would silently do nothing.
     /// </summary>
     public bool IsReadOnly => _readOnlyReason is not null;
 
@@ -71,7 +71,7 @@ public sealed class ContentStore
             format = CreateOrJoin(layout);
         }
 
-        var store = new ContentStore(layout, format, program ?? ProgramInfo.Unknown);
+        var store = new ContentStore(layout, format, program ?? ProgramInfo.Unknown, TimeProvider.System);
         if (!store.IsReadOnly)
         {
             Directory.CreateDirectory(layout.ObjectsDirectory);

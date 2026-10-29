@@ -811,7 +811,7 @@ window.__INLINE_DATA__ = null;
 'use strict';
 
 const LIFECYCLES = ['implemented', 'proposed', 'rejected', 'archived'];
-const STATUS_LABELS = { implemented: '已落地', proposed: '待评审', rejected: '已否决', archived: '已归档' };
+const STATUS_LABELS = { implemented: '已落地', proposed: '尚未完成', rejected: '已否决', archived: '已归档' };
 
 const CLASSES = ['architecture', 'feature', 'bug-fix', 'simplification', 'process', 'testing'];
 const CLASS_LABELS = {
@@ -1075,7 +1075,7 @@ function renderBaseline() {
 
   const kpis = [
     { label: '现行落地', count: implemented.length, desc: '生产已交付生效', color: '#10B981', filter: 'implemented' },
-    { label: '待评审提案', count: proposed.length, desc: '待团队确认', color: '#F59E0B', filter: 'proposed' },
+    { label: '尚未完成的笔记', count: proposed.length, desc: '含待选型、已定待实现和部分实现', color: '#F59E0B', filter: 'proposed' },
     { label: '避坑否决', count: rejected.length, desc: '防重犯事实存档', color: '#FF3366', filter: 'rejected' },
     { label: '化简裁撤', count: simplifications.length, desc: '代码只减不增', color: '#14B8A6', filter: 'simplification' },
   ];

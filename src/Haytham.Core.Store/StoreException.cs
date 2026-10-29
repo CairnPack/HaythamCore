@@ -11,7 +11,7 @@ public enum StoreError
     /// <summary><c>format.json</c> exists but cannot be read; it is never rewritten.</summary>
     FormatUnreadable,
 
-    /// <summary>The store was written by a newer format that this program must not write to.</summary>
+    /// <summary>The store's format or locking configuration does not permit this program to write safely.</summary>
     ReadOnly,
 
     /// <summary>The content does not match the expected size, SHA-1 or SHA-512.</summary>

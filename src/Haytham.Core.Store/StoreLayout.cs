@@ -23,6 +23,9 @@ sealed class StoreLayout(string root)
     /// </summary>
     public string DownloadLockPath(Sha1 sha1) => Path.Combine(DownloadLocksDirectory, sha1.ToString()[..3]);
 
+    /// <summary>Repair locks use the same bounded sharding as download locks, in an independent namespace.</summary>
+    public string RepairLockPath(Sha1 sha1) => Path.Combine(Root, "locks", "repair", sha1.ToString()[..3]);
+
     public string ObjectPath(Sha1 sha1)
     {
         var hex = sha1.ToString();

@@ -33,6 +33,8 @@ Status: <状态>
 
 `Proposal` 可以用将来时；`Acceptance criteria` 写清楚看到什么状态就算完成；`Risks` 同时写风险和已经接受的取舍。
 
+`Proposal` 标题与 `Status: proposed` 都不表示未获批准。在正文开头说明已确认范围、尚未决定的具体问题及实现进度；确认语义见 [SKILL §4](../SKILL.md#4-什么时候写什么时候改)。不增加新的批准字段。
+
 **`implemented/`**
 
 ```markdown

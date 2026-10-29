@@ -28,8 +28,9 @@ public sealed class ObjectDownloader
     }
 
     /// <param name="timeProvider">
-    /// The clock for every wait and timeout: retry backoff, <c>Retry-After</c> dates, queueing for the download
-    /// lock, the time written into lock holder records, and <see cref="DownloadOptions.ReadIdleTimeout"/>.
+    /// The clock for this downloader's waits and timeouts: retry backoff, <c>Retry-After</c> dates, queueing for the
+    /// download lock, its holder record dates, and <see cref="DownloadOptions.ReadIdleTimeout"/>.
+    /// Repair locks use the clock supplied by <see cref="ContentStore"/>.
     /// </param>
     public ObjectDownloader(ContentStore store, HttpClient http, DownloadOptions options, TimeProvider timeProvider)
     {
@@ -137,7 +138,7 @@ public sealed class ObjectDownloader
                         _options.ReadIdleTimeout,
                         _timeProvider);
                     await using var _ = body.ConfigureAwait(false);
-                    return await _store.Importer.ImportAsync(body, expected, cancellationToken).ConfigureAwait(false);
+                    return await _store.Importer.ImportAsync(body, expected, cancellationToken, "download").ConfigureAwait(false);
                 }
 
                 var status = (int)response.StatusCode;
