@@ -8,7 +8,12 @@ Status: proposed
      ## Acceptance criteria / ## Risks 折进 ## Consequences（或现在时的 ## Testing / ## Verification）。
   2. 前提不存在了或不再推进 → 改成 Status: rejected — <原因>；proposed 不能归档。
   3. Alternatives 必须写：只记录真正考虑过的方案；“不做／维持现状”只有当时真的考虑过才写。
+  4. proposed 只表示尚未完成实现。按实际情况填写下方说明，不自动写“待评审”，也不自动认定已获批准；详见 SKILL §4。
+     已确认示例：本篇记录用户已确认的决定；实现尚未开始，无需重新评审该决定。
+     候选稿示例：本篇为候选方案，A 与 B 的选择仍需决定；实现尚未开始。
 -->
+
+<说明已确认的范围与实现进度；若仅为候选方案，说明哪些选择仍未定。无关分支和占位提示写完后删除。>
 
 ## Problem
 
@@ -16,7 +21,7 @@ Status: proposed
 
 ## Proposal
 
-<打算怎么改，可以用将来时；包括关键设计、迁移步骤与还没定的问题>
+<写清已确认的做法或待比较的候选方案，以及实现步骤；只把尚未决定的具体问题单列，不把已确认决定重新标成待评审。>
 
 ## Alternatives considered
 
