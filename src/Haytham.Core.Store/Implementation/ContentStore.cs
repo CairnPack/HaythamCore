@@ -1,14 +1,5 @@
 namespace Haytham.Core.Store;
 
-public enum StoreOpenMode
-{
-    /// <summary>Fail with <see cref="StoreError.StoreMissing"/> when there is no store at the path.</summary>
-    OpenExisting,
-
-    /// <summary>Create the store when the directory is missing or empty.</summary>
-    CreateIfMissing,
-}
-
 /// <summary>
 /// The content-addressed store: one per machine, keyed by SHA-1. Haytham Core has no default location; the caller
 /// passes the root.
