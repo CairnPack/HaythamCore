@@ -11,6 +11,7 @@ Haytham Core 是 CairnPack 的可复用 Minecraft 启动器核心，介绍见 [R
 | 项目 | 内容 | 可依赖 |
 |---|---|---|
 | `Haytham.Core.Store` | CAS、下载、文件链接、临时目录；GC（根集合由外部提供） | 无 |
+| `Haytham.Core.Store.Runtime` | 把 Store 接成 Haytham.Runtime 的模块：打开唯一仓库、发布可用状态、提供 Store 的 Task | Store、`Haytham.Runtime`（NuGet） |
 | `Haytham.Core.Minecraft` | 启动核心的纯领域：版本解析、规则、参数、natives、崩溃诊断；不碰磁盘与网络 | 无 |
 | `Haytham.Core.Launch` | 启动核心的 I/O：版本元数据、Java、加载器安装、服务器 runtime、账号、游戏进程 | Minecraft、Store |
 

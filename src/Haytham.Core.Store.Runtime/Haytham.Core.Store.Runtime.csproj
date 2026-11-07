@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The Store as a Haytham.Runtime module. Haytham.Core.Store itself takes no dependency, so this is a separate package. -->
+  <PropertyGroup>
+    <Description>Haytham Core's content store as a Haytham.Runtime module.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Haytham.Runtime" />
+    <ProjectReference Include="..\Haytham.Core.Store\Haytham.Core.Store.csproj" />
+  </ItemGroup>
+
+</Project>
