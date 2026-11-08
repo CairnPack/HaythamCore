@@ -10,12 +10,12 @@ Haytham Core 是 CairnPack 的可复用 Minecraft 启动器核心，介绍见 [R
 
 | 项目 | 内容 | 可依赖 |
 |---|---|---|
-| `Haytham.Core.Store` | CAS、下载、文件链接、临时目录；GC（根集合由外部提供） | 无 |
-| `Haytham.Core.Store.Runtime` | 把 Store 接成 Haytham.Runtime 的模块：打开唯一仓库、发布可用状态、提供 Store 的 Task | Store、`Haytham.Runtime`（NuGet） |
+| `Haytham.Core.Store` | CAS、下载、文件链接、临时目录；GC（根集合由外部提供）；作为 Haytham.Runtime 模块打开唯一仓库、发布可用状态、提供 Store 的 Task | `Haytham.Runtime`（NuGet） |
 | `Haytham.Core.Minecraft` | 启动核心的纯领域：版本解析、规则、参数、natives、崩溃诊断；不碰磁盘与网络 | 无 |
 | `Haytham.Core.Launch` | 启动核心的 I/O：版本元数据、Java、加载器安装、服务器 runtime、账号、游戏进程 | Minecraft、Store |
 
 - 新项目也加 `Haytham.Core.` 前缀。
+- **一个功能的 Runtime 模块写在它自己的项目里，不另建接入项目。** 模块主类放在项目根目录（例如 `src/Haytham.Core.Store/StoreModule.cs`），Task、选项等按职责放进子目录。
 - **`Haytham.Core.Store` 作为独立的 NuGet 包发布**，单独定版本：Gebinde 的转接项目只依赖它，不依赖整个 Haytham Core。
 - **Haytham Core 与 Gebinde 互不引用。** `Haytham.Core.*` never 引用 `Gebinde.*`，也不认识 Manifest、Lockfile 或实例：启动入口只收“游戏目录＋版本＋加载器”。
 - **全局只有一个 CAS，以 sha1 为键**（`objects/<前两位>/<sha1>`）。对象一律只读；下载先原子写入 `object-*.part`，验证大小、sha1 与可选的 sha512 后才移入。

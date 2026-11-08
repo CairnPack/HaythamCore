@@ -1,7 +1,7 @@
 using System.Net;
 using Haytham.Runtime.Tasks;
 
-namespace Haytham.Core.Store.Runtime;
+namespace Haytham.Core.Store;
 
 public sealed partial class StoreObtainTask : RuntimeTask<ObtainRequest, ObtainResult>
 {

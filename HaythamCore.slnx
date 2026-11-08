@@ -1,7 +1,6 @@
 <Solution>
   <Folder Name="/src/">
     <Project Path="src/Haytham.Core.Store/Haytham.Core.Store.csproj" />
-    <Project Path="src/Haytham.Core.Store.Runtime/Haytham.Core.Store.Runtime.csproj" />
     <Project Path="src/Haytham.Core.Minecraft/Haytham.Core.Minecraft.csproj" />
     <Project Path="src/Haytham.Core.Launch/Haytham.Core.Launch.csproj" />
   </Folder>

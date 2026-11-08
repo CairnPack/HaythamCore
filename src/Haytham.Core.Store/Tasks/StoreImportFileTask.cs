@@ -1,6 +1,6 @@
 using Haytham.Runtime.Tasks;
 
-namespace Haytham.Core.Store.Runtime;
+namespace Haytham.Core.Store;
 
 public sealed record StoreImportFileInput(string Path, ExpectedContent? Expected = null);
 

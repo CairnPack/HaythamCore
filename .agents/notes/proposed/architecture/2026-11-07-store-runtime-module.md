@@ -1,4 +1,4 @@
-# Agent Note: 把 Store 接成 Haytham.Runtime 的模块（Haytham.Core.Store.Runtime）
+# Agent Note: 把 Store 接成 Haytham.Runtime 的模块
 
 Status: proposed
 
@@ -10,7 +10,7 @@ HaythamRuntime（CairnPack/HaythamRuntime）已以 NuGet 包 `Haytham.Runtime` 0
 
 约束有三条：
 
-- `Haytham.Core.Store` 的“可依赖：无”不变，直接用工厂打开 Store、不启动 Runtime 的用法 must 保留。
+- 直接用工厂打开 Store、不启动 Runtime 的用法 must 保留。
 - 仓库位置的优先级、位置记录、“位置不存在时不新建空仓库”这些是产品规则，不属于 HC。
 - 外接硬盘没插上这类打开失败时，宿主应用要能照常运行，用户修好后原地重试，不要求重启进程。
 
@@ -18,8 +18,8 @@ HaythamRuntime（CairnPack/HaythamRuntime）已以 NuGet 包 `Haytham.Runtime` 0
 
 ### 项目与依赖
 
-- 新项目 `src/Haytham.Core.Store.Runtime`，包名 `CairnPack.Haytham.Core.Store.Runtime`，依赖 `Haytham.Core.Store` 和 `Haytham.Runtime`；`Haytham.Core.Store` 本身不加依赖。
-- 源码按职责放在 `Module/`（模块、选项、快照、状态视图和不可用异常）、`Tasks/`（四个 Task、输入与网络设置）和 `Opening/`（位置、打开结果、打开委托和预期打开异常）；命名空间统一为 `Haytham.Core.Store.Runtime`。
+- 模块直接写在 `src/Haytham.Core.Store` 里（用户 2026-11-09 确认），`Haytham.Core.Store` 依赖 `Haytham.Runtime`；不另建接入项目。
+- 模块主类 `StoreModule.cs` must 放在项目根目录，方便找到入口，和 MC 模组把主类放在包根目录的习惯一致。其余源码按职责放在 `Module/`（选项、快照、状态视图）、`Tasks/`（四个 Task、输入与网络设置）、`Opening/`（位置、打开结果、打开委托），两个异常放进已有的 `Errors/`；命名空间沿用项目统一的 `Haytham.Core.Store`。
 - 仓库启用中央包管理（`Directory.Packages.props`），Runtime 的版本只写在这一处。使用 HC 的宿主 must 和 HC 用同一个 Runtime 版本，因为它们在同一次发布里编在一起。
 - 新依赖都是 MIT，已登记在 `THIRD_PARTY_NOTICES.md`。
 
@@ -58,7 +58,7 @@ HaythamRuntime（CairnPack/HaythamRuntime）已以 NuGet 包 `Haytham.Runtime` 0
 
 ## Alternatives considered
 
-- **把 Runtime 接入直接写进 `Haytham.Core.Store`** — 最有力的理由是少一个项目。不采用：Store 是单独发布、只依赖自己的包，Gebinde 的转接和不启动 Runtime 的使用者不应被迫带上 Runtime。
+- **单独建 `Haytham.Core.Store.Runtime` 接入项目，`Haytham.Core.Store` 保持不依赖任何包** — 最有力的理由是 HC 原有的“Store 可依赖：无”规则，以及不启动 Runtime 的使用者不必带上 Runtime。第一版就是这样实现的，2026-11-09 合并。不采用：拆 Runtime 本来就是为了让使用者方便地用上它，CairnPack 的产品都跑在 Runtime 上，“可依赖：无”这条规则已经过时；拆成两个项目只会让一个模块的代码分在两处。Runtime 是 MIT，带上它不影响 HC 的授权约束，不启动 Runtime 时直接用工厂的用法也照样保留。
 - **打开失败时让 `OnLoading` 抛错、整个宿主启动失败** — 最有力的理由是状态简单，模块要么可用要么不存在。不采用：外接硬盘没插上时宿主应用会打不开，用户也没法在应用里修正位置后重试。
 - **用模块内的锁和 Opening 状态处理并发的打开请求** — 最有力的理由是不依赖宿主怎么提交。不采用：Runtime 的队列键已经能把打开请求串行，锁、Opening 状态和对应的错误键都是多出来的。
 - **在 HC 事件总线上挂监听器完成打开和操作**（[HC 生命周期接入](2026-10-30-hc-lifecycle-event-bus.md)的候选形状） — 最有力的理由是接近 MC 事件系统的使用体验。不采用：Runtime 已经提供生命周期事件和 Task，HC 再建一条总线就是第二套执行机制。

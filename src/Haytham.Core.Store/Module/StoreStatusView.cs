@@ -1,4 +1,4 @@
-namespace Haytham.Core.Store.Runtime;
+namespace Haytham.Core.Store;
 
 /// <summary>A host-owned view of the module's latest immutable snapshot.</summary>
 public sealed class StoreStatusView

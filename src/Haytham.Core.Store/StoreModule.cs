@@ -1,7 +1,7 @@
 using Haytham.Runtime.Events;
 using Haytham.Runtime.Modules;
 
-namespace Haytham.Core.Store.Runtime;
+namespace Haytham.Core.Store;
 
 [RuntimeModule]
 internal sealed class StoreModule(StoreModuleOptions options, StoreStatusView status) : IRuntimeModule

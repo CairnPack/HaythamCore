@@ -1,4 +1,4 @@
-namespace Haytham.Core.Store.Runtime;
+namespace Haytham.Core.Store;
 
 /// <summary>An expected opening failure identified by a stable error key and optional message arguments.</summary>
 /// <param name="location">Where opening was tried; null when the location itself could not be resolved.</param>

@@ -1,4 +1,4 @@
-namespace Haytham.Core.Store.Runtime;
+namespace Haytham.Core.Store;
 
 public sealed class StoreUnavailableException(StoreSnapshot snapshot) : Exception("haytham.store.unavailable")
 {

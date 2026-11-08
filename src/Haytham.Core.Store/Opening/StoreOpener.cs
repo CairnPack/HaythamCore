@@ -1,4 +1,4 @@
-namespace Haytham.Core.Store.Runtime;
+namespace Haytham.Core.Store;
 
 /// <summary>Opens a store using the host's location resolution and location record handling.</summary>
 /// <exception cref="StoreOpenException">An expected location or store opening failure.</exception>

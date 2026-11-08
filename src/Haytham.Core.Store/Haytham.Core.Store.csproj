@@ -1,6 +1,11 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <ItemGroup>
+    <!-- The Store is also a Haytham.Runtime module; StoreModule.cs at the project root is its entry. -->
+    <PackageReference Include="Haytham.Runtime" />
+  </ItemGroup>
+
+  <ItemGroup>
     <!-- Tests take file locks directly and ask the importer about stored objects. -->
     <InternalsVisibleTo Include="Haytham.Core.Store.Tests" />
   </ItemGroup>
