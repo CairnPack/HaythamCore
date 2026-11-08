@@ -21,18 +21,13 @@ internal sealed class StoreModule(StoreModuleOptions options, StoreStatusView st
         return ValueTask.CompletedTask;
     }
 
-    private async ValueTask OnLoading(RuntimeEvents.OnLoading e, EventContext context)
-    {
-        try
-        {
-            await OpenAsync(new StoreOpenInput(null), context.Cancellation).ConfigureAwait(false);
-        }
-        catch (StoreOpenException)
-        {
-            // OpenAsync published the expected failure; the host can finish loading and retry later.
-        }
-    }
+    // An expected open failure leaves the Store Unavailable; the host still finishes loading and can retry.
+    private async ValueTask OnLoading(RuntimeEvents.OnLoading e, EventContext context) =>
+        await OpenAsync(new StoreOpenInput(null), context.Cancellation).ConfigureAwait(false);
 
+    /// <summary>Opens the Store and publishes the outcome.</summary>
+    /// <returns>A Ready snapshot, or an Unavailable one carrying the host's <see cref="StoreOpenException"/>.</returns>
+    /// <exception cref="StoreOpenException"><c>haytham.store.alreadyOpen</c>: another path while Ready; the state does not change.</exception>
     internal async ValueTask<StoreSnapshot> OpenAsync(StoreOpenInput input, CancellationToken cancellation)
     {
         var current = status.Current;
@@ -51,8 +46,9 @@ internal sealed class StoreModule(StoreModuleOptions options, StoreStatusView st
         }
         catch (StoreOpenException failure)
         {
-            status.Publish(new StoreSnapshot(StoreAvailability.Unavailable, failure.Location, failure));
-            throw;
+            var unavailable = new StoreSnapshot(StoreAvailability.Unavailable, failure.Location, failure);
+            status.Publish(unavailable);
+            return unavailable;
         }
 
         Volatile.Write(ref store, opened.Store);

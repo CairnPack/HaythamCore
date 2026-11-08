@@ -26,6 +26,7 @@ HaythamRuntime（CairnPack/HaythamRuntime）已以 NuGet 包 `Haytham.Runtime` 0
 ### 模块与状态
 
 - `StoreModule` 在 `OnLoading` 调用宿主提供的 `StoreOpener`。成功就保存 Store 并发布 Ready；宿主抛 `StoreOpenException`（预期的打开失败，带稳定的错误键）就发布 Unavailable 和原因，`OnLoading` 正常结束，宿主照常启动。其他异常算内部缺陷，照常往上抛，never 降成“不可用”。
+- 模块内部的打开方法 `OpenAsync` 把预期的打开失败作为 Unavailable 快照返回（快照带着那个 `StoreOpenException`），不抛出；`OnLoading` 直接等待它，不写 try/catch。只有 `StoreOpenTask` 在拿到 Unavailable 快照时把快照里的失败抛出，因为请求打开的调用方要把它当成错误处理。
 - 可用状态只有 `Unavailable`、`Ready`。宿主把 `StoreStatusView` 放进能力表，从它同步读取最新快照（可用性、位置及来源、最近一次打开失败）；它不暴露 Store 实例。
 - Store 实例放在模块的私有字段里，Task 每次执行时取；不可用时抛 `StoreUnavailableException`（`haytham.store.unavailable`）。不增加切换仓库接口或锁。
 - 位置规则全部在宿主的 `StoreOpener` 里，HC 只决定何时打开、何时发布状态。
@@ -40,7 +41,7 @@ HaythamRuntime（CairnPack/HaythamRuntime）已以 NuGet 包 `Haytham.Runtime` 0
 | `StoreOpenTask` | `StoreOpenInput(Path?)` → `StoreSnapshot` | Wait |
 
 - Verify、ImportFile、Obtain 在 Store 不可用时直接失败，不等待用户修好；否则退出策略为 Wait 的 Obtain 会让安全退出一直等下去。
-- `StoreOpenTask`：已 Ready 且没给路径或路径相同，返回当前快照；位置用平台的 `Path.GetRelativePath` 比较，消除相对路径与末尾分隔符等表示差异；已 Ready 但路径不同，抛错误键为 `haytham.store.alreadyOpen` 的 `StoreOpenException`，不改变状态；Unavailable 时调用 `StoreOpener`，成功发布 Ready，只有 `StoreOpenException` 才发布 Unavailable 并重新抛出；它带的位置（解析出位置之后才失败时由宿主填入）放进快照的 `location`，界面据此说明是哪个文件夹打不开，其他异常直接向上传播。宿主 must 用同一个队列键提交所有打开请求，由 Runtime 串行，所以模块里不加锁。
+- `StoreOpenTask`：已 Ready 且没给路径或路径相同，返回当前快照；位置用平台的 `Path.GetRelativePath` 比较，消除相对路径与末尾分隔符等表示差异；已 Ready 但路径不同，抛错误键为 `haytham.store.alreadyOpen` 的 `StoreOpenException`，不改变状态；Unavailable 时调用 `StoreOpener`，成功发布 Ready，只有 `StoreOpenException` 才发布 Unavailable，并作为这次 Task 的错误抛给调用方；它带的位置（解析出位置之后才失败时由宿主填入）放进快照的 `location`，界面据此说明是哪个文件夹打不开，其他异常直接向上传播。宿主 must 用同一个队列键提交所有打开请求，由 Runtime 串行，所以模块里不加锁。
 
 ### 每次 Obtain 的网络设置
 
@@ -59,6 +60,7 @@ HaythamRuntime（CairnPack/HaythamRuntime）已以 NuGet 包 `Haytham.Runtime` 0
 ## Alternatives considered
 
 - **单独建 `Haytham.Core.Store.Runtime` 接入项目，`Haytham.Core.Store` 保持不依赖任何包** — 最有力的理由是 HC 原有的“Store 可依赖：无”规则，以及不启动 Runtime 的使用者不必带上 Runtime。第一版就是这样实现的，2026-11-09 合并。不采用：拆 Runtime 本来就是为了让使用者方便地用上它，CairnPack 的产品都跑在 Runtime 上，“可依赖：无”这条规则已经过时；拆成两个项目只会让一个模块的代码分在两处。Runtime 是 MIT，带上它不影响 HC 的授权约束，不启动 Runtime 时直接用工厂的用法也照样保留。
+- **`OpenAsync` 发布 Unavailable 后重新抛出，`OnLoading` 用空的 catch 接住** — 最有力的理由是打开 Task 不用再判断快照，失败直接从 `OpenAsync` 传上去。第一版就是这样写的，2026-11-09 改掉。不采用：只看 `OnLoading` 的人看到一个什么都不做的 catch，会以为错误被吞掉了，要去读 `OpenAsync` 才知道失败已经发布。预期的失败作为返回的状态表达出来，只有真要把它当错误的调用方才抛出，读起来更直接。
 - **打开失败时让 `OnLoading` 抛错、整个宿主启动失败** — 最有力的理由是状态简单，模块要么可用要么不存在。不采用：外接硬盘没插上时宿主应用会打不开，用户也没法在应用里修正位置后重试。
 - **用模块内的锁和 Opening 状态处理并发的打开请求** — 最有力的理由是不依赖宿主怎么提交。不采用：Runtime 的队列键已经能把打开请求串行，锁、Opening 状态和对应的错误键都是多出来的。
 - **在 HC 事件总线上挂监听器完成打开和操作**（[HC 生命周期接入](2026-10-30-hc-lifecycle-event-bus.md)的候选形状） — 最有力的理由是接近 MC 事件系统的使用体验。不采用：Runtime 已经提供生命周期事件和 Task，HC 再建一条总线就是第二套执行机制。
