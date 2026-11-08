@@ -11,10 +11,10 @@ Status: implemented
 ## Decision
 
 - `Api/IContentStore.cs` 集中声明仓库身份、路径、只读状态、对象纳入、验证与获取，并用英文 XML 文档说明行为和约束。接口不包含打开仓库的静态方法，创建职责独立。
-- `Factories/ContentStoreFactory.cs` 提供 `Open` 和 `Create`。前者调用现有 `ContentStore.Open`，后者接收已有的同一个 `ContentStore` 实例；两者按默认组装方式返回 `IContentStore`。调用方显式提供 `HttpClient` 和含 User-Agent 的 `DownloadOptions`，后者的现有默认配置照常生效。
-- `Implementation/DefaultContentStore.cs` 是内部薄适配器，将仓库方法交给现有 `ContentStore`，将 `ObtainAsync` 交给现有 `ObjectDownloader`。既有具体类、方法签名和命名空间保留，原有调用方继续工作。
+- `Factories/ContentStoreFactory.cs` 提供 `Open` 和 `Create`。前者调用现有 `ContentStore.Open`，后者接收已有的同一个 `ContentStore` 实例；两者按默认组装方式返回 `IContentStore`。工厂接收 `DownloadOptions`，重试、超时与并发额度由 Store 共享；调用方在每次 `ObtainAsync(request, http, userAgent, cancellationToken)` 显式提供借用的 `HttpClient` 和 User-Agent。
+- `Implementation/DefaultContentStore.cs` 是内部薄适配器，将仓库方法交给现有 `ContentStore`，将 `ObtainAsync` 交给现有 `ObjectDownloader`。具体类和命名空间保留；工厂与 Obtain 的参数采用每次获取传入网络设置的签名。
 - 具体的 `ContentStore` 移入 `Implementation/`；公共请求、结果、枚举和值类型集中到 `Models/`，错误类型集中到 `Errors/`。从 `ContentStore`、`ObjectVerifier` 中搬出公共枚举；从 `ProgramInfo` 中搬出内部 `ProcessIdentity` 到 `Locking/`。这些移动只调整声明位置，不改方法体。
-- `Objects/`、`Downloading/`、`Locking/`、`Persistence/` 和 `Helpers/` 继续按既有职责承载实现。工厂借用调用方的 HTTP 客户端，不创建隐藏的全局状态，不接管其释放；调用方在组装入口复用同一个仓库和返回的接口实例。
+- `Objects/`、`Downloading/`、`Locking/`、`Persistence/` 和 `Helpers/` 继续按既有职责承载实现。每次 Obtain 借用调用方的 HTTP 客户端，不创建隐藏的全局状态，不接管其释放；调用方在组装入口复用同一个仓库和返回的接口实例。
 
 本决定为公开库增加一个以消费方阅读为目的的接口，不要求存在第二套存储实现，也不为内部每个类复制一份接口。Gebinde 仍声明自己的存储契约，由其转接项目接入，双方的产品依赖方向保持一致。
 
@@ -34,7 +34,7 @@ Status: implemented
 
 ## Verification
 
-- `Api/` 只包含 `IContentStore.cs`。既有公开类型的命名空间、可见性和方法签名保持一致。
+- `Api/` 只包含 `IContentStore.cs`。既有公开类型的命名空间、可见性保持一致；工厂不接收 HTTP 客户端，Obtain 每次接收客户端和 User-Agent。
 - 对照改动前保存的 18 个源文件：15 个文件的 SHA-256 完全一致；其余 3 个逐一比较拆出的声明和剩余实现正文，均与原文一致。
 - `dotnet build HaythamCore.slnx -c Release` 通过，0 警告、0 错误。
 - `dotnet test --solution HaythamCore.slnx -c Release --no-build` 通过，151 项成功、0 失败、0 跳过。原有 143 项保持通过，新增 8 项覆盖默认打开模式、仓库身份、三种纳入入口及校验、下载与纳入共享对象、HTTP 配置与所有权、取消令牌和只读错误传播。
@@ -46,5 +46,5 @@ Status: implemented
 
 - 收益：消费方只读一份短契约即可了解主要能力，默认工厂封装现有两套入口的组装；内部实现与既有调用方式保持一致。
 - 代价：公开契约与具体实现需要同步维护；以接口调用的集成测试检查转发和配置是否接对。
-- 所有权：工厂返回的适配器借用 `HttpClient`，调用方必须保持其有效并负责最终释放，工厂不提供隐藏的全局客户端或仓库实例。
+- 所有权：工厂返回的适配器在每次 Obtain 借用 `HttpClient`，调用方必须在本次调用完成前保持其有效并负责最终释放，工厂不提供隐藏的全局客户端或仓库实例。
 - 范围：本篇只集中当前已有能力，不增加 GC、会话、Pin 等尚未实现的操作，不把 Gebinde 的存储协议搬进 Haytham Core。

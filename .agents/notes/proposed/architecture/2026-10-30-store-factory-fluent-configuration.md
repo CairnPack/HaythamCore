@@ -12,15 +12,14 @@ Status: proposed
 
 ### 配置回调候选
 
-建议保留现有 `Open`、`Create` 签名，考虑增加同步配置回调重载：根目录或已有 `ContentStore`、借用的 `HttpClient` 作为显式必填参数；回调通过一个轻量配置类型提供链式方法。配置结束后由工厂创建并返回 `IContentStore`，回调内无需调用 `Build`。
+建议保留现有 `Open`、`Create` 签名，考虑增加同步配置回调重载：根目录或已有 `ContentStore` 作为显式必填参数；回调通过一个轻量配置类型提供链式方法。配置结束后由工厂创建并返回 `IContentStore`，回调内无需调用 `Build`。当前直接工厂入口为 `Open(root, options, mode, program)` 和 `Create(store, options)`；HTTP 客户端与 User-Agent 由每次 `ObtainAsync(request, http, userAgent, cancellationToken)` 传入。
 
 以下仅为候选调用形状，方法名尚未实现：
 
 ```csharp
-IContentStore store = ContentStoreFactory.Open(root, http, b => b
+IContentStore store = ContentStoreFactory.Open(root, b => b
     .WithDownloads(new DownloadOptions
     {
-        UserAgent = "my-launcher/1.0",
         MaxConcurrentRequests = 8
     })
     .WithOpenMode(StoreOpenMode.CreateIfMissing));
@@ -29,7 +28,7 @@ IContentStore store = ContentStoreFactory.Open(root, http, b => b
 - 链式方法只记录配置；配置回调同步执行一次，配置完整性检查须在打开仓库前完成。不得接受会变成 `async void` 的异步配置流程。
 - 复用当前不可变的 `DownloadOptions`，不为每个现有下载属性再复制一套 fluent 方法或嵌套 builder。
 - 已有 `ContentStore` 的创建入口可以采用同样的下载配置形状，但不提供打开模式，避免对已经打开的仓库表达无效配置。
-- 返回的 `IContentStore` 继续由调用方注入并复用；回调结束不代表仓库被释放或任务被取消。`HttpClient` 的所有权仍归调用方，不引入自动释放、隐式缓存或全局单例。
+- 返回的 `IContentStore` 继续由调用方注入并复用，共享同一下载并发额度；回调结束不代表仓库被释放或任务被取消。每次 Obtain 借用的 `HttpClient` 所有权仍归调用方，方法完成前本次网络工作结束，不引入自动释放、隐式缓存或全局单例。
 - 底层存储、下载、重试、锁、校验和取消算法继续使用现有实现。
 
 ### 生命周期事件候选
@@ -55,14 +54,14 @@ IContentStore store = ContentStoreFactory.Open(root, http, b => b
 ## Alternatives considered
 
 - **保持现有工厂，调用方使用命名参数与对象初始化器。** 好处是公开类型最少，必填依赖直接显示在签名中；当前配置量下已经足够清楚。它仍是有效的低成本选择。候选 DSL 的额外收益在于集中呈现可选设置和提供链式补全，而非新增存储能力。
-- **将所有参数和所有下载选项都包装成链式方法。** 好处是风格统一、整段调用可连续书写。代价是新增更多公开方法，并把遗漏根目录、HTTP 客户端等错误推迟到创建时；当前建议保留必填参数并复用 `DownloadOptions`。
+- **将所有参数和所有下载选项都包装成链式方法。** 好处是风格统一、整段调用可连续书写。代价是新增更多公开方法，并把遗漏根目录等错误推迟到创建时；当前建议保留必填参数并复用 `DownloadOptions`。
 - **以生命周期事件统一所有 Store 消费。** 好处是入口贴近 KJS，扩展可以集中声明在何时工作。代价是普通消费也依赖注册顺序与触发方，依赖关系更难从构造函数看出。当前建议把事件用于生命周期扩展，常规操作继续通过注入的 `IContentStore` 调用。
 
 ## Acceptance criteria
 
 - 如采纳，文档同时展示直接工厂调用和回调重载，示例返回可用于构造函数注入的 `IContentStore`。
 - 既有公开签名和所有权约束保持兼容；新入口与直接入口的行为一致。
-- 验证缺失下载配置、回调异常、默认打开模式、已有仓库身份和 HTTP 所有权；配置失败不得先创建仓库。
+- 验证缺失下载配置、回调异常、默认打开模式和已有仓库身份；配置失败不得先创建仓库。HTTP 所有权仍由 Obtain 调用契约保证。
 - 现有测试继续通过，笔记校验通过。
 - 如采纳生命周期事件，验证宿主间订阅隔离、准确触发时机与次数、打开失败和处理器异常；如支持异步处理器，验证等待与取消语义。
 

@@ -43,12 +43,11 @@ public class ObjectRepairTests
         using var handler = new FakeHttpHandler().Respond(HttpMethod.Get, Url, (_, _) =>
             Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(Content) }));
         using var http = new HttpClient(handler);
-        var downloader = new ObjectDownloader(store, http, new DownloadOptions
+        var downloader = new ObjectDownloader(store, new DownloadOptions
         {
-            UserAgent = "repair-tests/1.0",
             ReadIdleTimeout = Timeout.InfiniteTimeSpan,
         }, clock);
-        var result = await downloader.ObtainAsync(new ObtainRequest { Sha1 = Key, Urls = [new Uri(Url)] }, Token);
+        var result = await downloader.ObtainAsync(new ObtainRequest { Sha1 = Key, Urls = [new Uri(Url)] }, http, "repair-tests/1.0", Token);
         Assert.Single(handler.Requests);
         return result.Outcome;
     }

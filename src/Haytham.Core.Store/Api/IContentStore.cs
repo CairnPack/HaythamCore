@@ -4,16 +4,16 @@ namespace Haytham.Core.Store;
 /// <remarks>
 /// Create an instance with <see cref="ContentStoreFactory"/> and inject this interface into consumers. Share the
 /// same instance for one store so downloads also share their concurrency limit. The caller chooses the store
-/// location and keeps the HTTP client supplied to the factory alive. I/O failures, content mismatches and
+/// location and supplies a borrowed HTTP client and a User-Agent on each obtain. I/O failures, content mismatches and
 /// cancellation propagate from the underlying store and downloader.
 /// </remarks>
 /// <example>
 /// <code>
-/// using var http = new HttpClient();
 /// IContentStore store = ContentStoreFactory.Open(
-///     storePath, http, new DownloadOptions { UserAgent = "my-launcher/1.0" },
-///     StoreOpenMode.CreateIfMissing);
+///     storePath, new DownloadOptions(), StoreOpenMode.CreateIfMissing);
 /// var imported = await store.ImportBytesAsync(bytes, cancellationToken: cancellationToken);
+/// using var http = new HttpClient();
+/// var obtained = await store.ObtainAsync(request, http, "my-launcher/1.0", cancellationToken);
 /// </code>
 /// </example>
 public interface IContentStore
@@ -68,12 +68,20 @@ public interface IContentStore
 
     /// <summary>Reuses a matching stored object, or downloads and validates it from the request's candidate URLs.</summary>
     /// <remarks>
-    /// Downloads use the factory's HTTP client and options, including the User-Agent, retries and concurrency limit.
+    /// Downloads use this call's client and User-Agent, with the store's shared retries and concurrency limit.
     /// A cross-process download lock prevents duplicate downloads of the same object.
+    /// The client remains owned by the caller. All network work for this call ends before the returned task completes,
+    /// including on failure or cancellation; the client may then be disposed.
     /// </remarks>
     /// <param name="request">The required SHA-1, optional size and SHA-512, and candidate HTTP(S) URLs in order.</param>
+    /// <param name="http">The caller-owned HTTP client, kept alive until this operation completes.</param>
+    /// <param name="userAgent">The User-Agent sent with every request in this operation.</param>
     /// <param name="cancellationToken">Cancels waits and ongoing I/O.</param>
     /// <returns>The stored object and the successful source URL, or a null source when the object was reused.</returns>
     /// <exception cref="StoreException">The store is read-only, a lock times out, or no candidate obtains valid content.</exception>
-    Task<ObtainResult> ObtainAsync(ObtainRequest request, CancellationToken cancellationToken = default);
+    Task<ObtainResult> ObtainAsync(
+        ObtainRequest request,
+        HttpClient http,
+        string userAgent,
+        CancellationToken cancellationToken = default);
 }

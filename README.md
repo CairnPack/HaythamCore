@@ -21,18 +21,20 @@ dotnet build HaythamCore.slnx
 ```csharp
 using Haytham.Core.Store;
 
-using var http = new HttpClient();
 IContentStore store = ContentStoreFactory.Open(
     storePath,
-    http,
-    new DownloadOptions { UserAgent = "my-launcher/1.0" },
+    new DownloadOptions { MaxConcurrentRequests = 8 },
     StoreOpenMode.CreateIfMissing);
 
 ImportResult imported = await store.ImportFileAsync(filePath, cancellationToken: cancellationToken);
 ObjectState state = await store.VerifyAsync(imported.Sha1, VerifyMode.Full, cancellationToken);
+
+using var http = new HttpClient();
+var request = new ObtainRequest { Sha1 = imported.Sha1, Urls = [new Uri("https://example.com/object.jar")] };
+ObtainResult obtained = await store.ObtainAsync(request, http, "my-launcher/1.0", cancellationToken);
 ```
 
-`ObtainAsync` 通过同一个接口复用已有对象或下载缺失对象。已有 `ContentStore` 实例时，使用 `ContentStoreFactory.Create(existingStore, http, options)`，直接复用该实例。调用方在组装入口创建并复用接口实例；HTTP 客户端由调用方持有、保持有效并最终释放。工厂默认只打开已有仓库，创建仓库需要显式指定 `CreateIfMissing`，仓库路径和 User-Agent 没有库内默认值。
+`ObtainAsync(request, http, userAgent, cancellationToken)` 通过同一个接口复用已有对象或下载缺失对象，每次调用传入当时的 HTTP 客户端和 User-Agent。已有 `ContentStore` 实例时，使用 `ContentStoreFactory.Create(existingStore, options)`，直接复用该实例。调用方在组装入口创建并复用接口实例，使下载共享同一并发额度；重试等设置仍在 `DownloadOptions` 里。Store 只借用客户端，不释放它；本次调用的网络工作在方法完成（包括失败或取消）前结束，调用方此后可以释放客户端。工厂默认只打开已有仓库，创建仓库需要显式指定 `CreateIfMissing`，仓库路径和 User-Agent 没有库内默认值。
 
 既有 `ContentStore` 和 `ObjectDownloader` 的直接调用方式继续保留。
 

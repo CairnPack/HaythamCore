@@ -39,7 +39,7 @@ Status: implemented
 | 写 `.part` 时的普通 `IOException`（例如磁盘满） | 不重试，直接抛出：磁盘满了，重试也还是满的 |
 | 调用方取消 | 直接抛出取消异常，不重试，也不算进 `DownloadFailed`（见下面的“调用方取消优先”） |
 
-- `UserAgent` 是 `DownloadOptions` 的 `required` 属性，每个请求都带上；库里不写默认值。
+- `HttpClient` 和 `userAgent` 是每次 `ObtainAsync` 的必填参数，每个请求都带上当次的 User-Agent；库里不写默认值，也不释放借入的客户端。本次调用的网络工作在方法完成前结束。
 - 同一个 `ObjectDownloader` 同时在途的请求不超过 `MaxConcurrentRequests`（默认 8）。重试前的等待不占名额。
 - 所有等待与计时（重试的退避、`Retry-After`、排队等锁、空闲超时）都用构造函数注入的 `TimeProvider`，见下面的“时钟”。
 
@@ -84,7 +84,7 @@ Store 里凡是“现在几点”和“过了多久”，都问同一个 .NET �
 | 占用者记录的 `since` | `FileLock` 用 `GetUtcNow()` 取值，作为参数传给 `LockHolders.Register` |
 | `IdleTimeoutStream` | 见上面的“响应体的空闲超时” |
 
-- 公开构造函数有两个：原有的三参数版本 `ObjectDownloader(ContentStore, HttpClient, DownloadOptions)` 用 `TimeProvider.System`；新增的重载 `ObjectDownloader(ContentStore, HttpClient, DownloadOptions, TimeProvider)` 接收调用方的时钟，传 `null` 抛 `ArgumentNullException`。原来 internal 的、收 `delay` 回调的构造函数删掉了。
+- 公开构造函数有两个：两参数版本 `ObjectDownloader(ContentStore, DownloadOptions)` 用 `TimeProvider.System`；显式时钟重载 `ObjectDownloader(ContentStore, DownloadOptions, TimeProvider)` 接收调用方的时钟，传 `null` 抛 `ArgumentNullException`。原来 internal 的、收 `delay` 回调的构造函数删掉了。
 - 用重载而不是给原有签名加一个可选参数：Store 作为独立的 NuGet 包发布，加可选参数等于换掉原来的方法签名，按旧版本编译的调用方升级后会在运行时找不到构造函数；重载让源代码和已编译的调用都不受影响。
 - 不经过 `TimeProvider` 的时间：`ProcessIdentity` 读的是进程的启动时间，验证记录的 `FileStamp` 读的是文件的修改时间。它们是系统记下的时间点，要和进程表、文件系统里的值比较，不是“现在”，所以 never 换成注入的时钟。`ObjectVerifier` 不读时钟；`ContentStore` 为 `ObjectImporter` 注入独立的修复等待时钟，公开打开入口使用系统时钟，详见[修复锁](../bug-fix/2026-10-27-store-repair-lock.md)。`HttpClient.Timeout` 由调用方传入的 `HttpClient` 自己计时，不归 Store 管。
 - 构造函数注入的其余结构不变：`ContentStore` 仍然自己创建 `ObjectVerifier` 与 `ObjectImporter`。它们只在仓库内部组合，调用方没有替换它们的需要。
@@ -97,8 +97,8 @@ Store 里凡是“现在几点”和“过了多久”，都问同一个 .NET �
 
 参数错误要在拿锁、联网之前报出来，否则要等某个 URL 回 200 才暴露；所有 URL 都 404 时会被 `DownloadFailed` 掩盖，对象已经在仓库里时完全不报。
 
-- 构造函数：`UserAgent` 用 `request.Headers.UserAgent.TryParseAdd`（`HttpHeaderValueCollection<T>.TryParseAdd`） 试解析一次（例如 `name/1.0 contact@x.com` 不合法，联系方式要放进括号）；`RetryDelay`、`MaxRetryAfter` 不能是负数；`MaxRetryAfter` 与 `ReadIdleTimeout` 不能超过 `int.MaxValue` 毫秒（约 24.8 天），这个值在 `Task.Delay(TimeSpan, TimeProvider)` 与带 `TimeProvider` 的 `CancellationTokenSource` 能接受的计时长度以内；`ReadIdleTimeout` 还必须大于零，或者是 `Timeout.InfiniteTimeSpan`。
-- `ObtainAsync`：见流程第 1 步。`Sha512` 与 `Size` 的检查和纳入时用的是同一个函数 `ObjectImporter.Validate`（SHA-512 长度 128，大小写都接受；大小不能是负数），所以两边的规则和错误消息不会分开演变。
+- 构造函数：`RetryDelay`、`MaxRetryAfter` 不能是负数；`MaxRetryAfter` 与 `ReadIdleTimeout` 不能超过 `int.MaxValue` 毫秒（约 24.8 天），这个值在 `Task.Delay(TimeSpan, TimeProvider)` 与带 `TimeProvider` 的 `CancellationTokenSource` 能接受的计时长度以内；`ReadIdleTimeout` 还必须大于零，或者是 `Timeout.InfiniteTimeSpan`。
+- `ObtainAsync`：先用 `HttpHeaderValueCollection<T>.TryParseAdd` 验证本次 User-Agent（例如 `name/1.0 contact@x.com` 不合法，联系方式要放进括号），然后按流程第 1 步检查请求。`Sha512` 与 `Size` 的检查和纳入时用的是同一个函数 `ObjectImporter.Validate`（SHA-512 长度 128，大小写都接受；大小不能是负数），所以两边的规则和错误消息不会分开演变。
 
 ### 已有对象不符合期望时为什么报错，而不是重新下载
 
@@ -163,7 +163,7 @@ POSIX 上，`FileShare` 背后的 `flock` 可以被 AppContext 开关 `System.IO
 - 收益：除了并发下载的那一个测试，计时相关的测试都推进假时钟，不再真的等待；等锁的退避序列（50、100、50 ms）、空闲超时、`Retry-After` 日期这些以前没法精确断言的时长，现在都直接断言。
 - 代价：测试项目多了一个包 `Microsoft.Extensions.TimeProvider.Testing`（只用于测试，不随 Store 包分发）。用假时钟的测试要按顺序写出每一次等待；代码多等了一次而测试没有推进时钟，操作会停在没人推进的假时钟上；测试经过 `TestClock.WithWatchdogAsync` 等整个操作，30 秒真实时间后失败，并在信息里列出观察到的计时器序列（少等了一次时，`NextTimerAsync` 会在 10 秒后报错，信息同样列出计时器序列）。见[假时钟的看门狗](../testing/2026-10-27-fake-clock-watchdog.md)。
 - 代价：POSIX 上“被占用”的判断依赖 .NET 把 errno 放进 `HResult`，这是 runtime 源码里的行为，没有正式文档；本机只在 Windows 上跑过测试；Haytham Core 的 CI 在三平台 `dotnet build` 之后运行 `dotnet test`，见[子模块 CI 运行测试](../process/2026-10-27-ci-runs-tests.md)，但 Linux 与 macOS 的结果在写这条时还没有看到。
-- 测试：`FileLockTests` 覆盖同一进程的第二个句柄排队、按 50、100、50 ms 退避后超时并列出占用者（记录的 `since` 来自注入的时钟），记录只在持有期间存在，已结束进程的记录被清掉、不显示，等待可取消。`ObjectDownloaderTests` 覆盖下载与 User-Agent、已存在时不联网、5xx 翻倍重试、429 遵守 `Retry-After`（秒数与日期两种，日期按注入时钟的“现在”计算）、超过上限换地址、404 不重试、内容不符换地址、网络错误重试到上限并列出每个原因、等锁超时列出占用者、等锁之后发现对象已在而不再下载、已有对象的大小或 sha512 不符时抛出与纳入相同的 `ContentMismatch` 且不发请求（加锁前与等锁之后两处）、已有对象全部相符时返回 `AlreadyPresent`、并发 obtain 只下载一次、只读仓库拒绝下载；还覆盖响应体停住时超时并重试、一直停住时失败原因写明空闲超时、停住时调用方取消照常抛出且不重试、读响应体时调用方取消而内层流抛 `IOException`／`HttpIOException`／不带令牌的取消异常时都抛出带调用方令牌的取消异常（分别在最后一次尝试、退避超过上限、还有剩余尝试三种情况下，只发一次请求、不启动退避计时器）、空闲计时器触发与调用方取消同时发生（两种先后顺序）时在最后一次尝试抛出调用方的取消异常而不是 `DownloadFailed`、调用方取消后自定义 handler 在发请求时抛 `HttpRequestException`（最后一次尝试、退避超过上限、还有剩余尝试三种情况）时抛出调用方的取消异常且只发一次请求、读响应体中途出错时重试、不合法的 User-Agent 在构造时报错、不合法的 SHA-512 与负的大小在任何请求之前报错（对象已在仓库时也报）、退避超过上限时换地址且不说成 `Retry-After`（状态码与网络错误两个分支）、64 次尝试不溢出、`Content-Length` 与期望大小不同时不读响应体就换地址。
+- 测试：`FileLockTests` 覆盖同一进程的第二个句柄排队、按 50、100、50 ms 退避后超时并列出占用者（记录的 `since` 来自注入的时钟），记录只在持有期间存在，已结束进程的记录被清掉、不显示，等待可取消。`ObjectDownloaderTests` 覆盖下载与 User-Agent、已存在时不联网、5xx 翻倍重试、429 遵守 `Retry-After`（秒数与日期两种，日期按注入时钟的“现在”计算）、超过上限换地址、404 不重试、内容不符换地址、网络错误重试到上限并列出每个原因、等锁超时列出占用者、等锁之后发现对象已在而不再下载、已有对象的大小或 sha512 不符时抛出与纳入相同的 `ContentMismatch` 且不发请求（加锁前与等锁之后两处）、已有对象全部相符时返回 `AlreadyPresent`、并发 obtain 只下载一次、只读仓库拒绝下载；还覆盖响应体停住时超时并重试、一直停住时失败原因写明空闲超时、停住时调用方取消照常抛出且不重试、读响应体时调用方取消而内层流抛 `IOException`／`HttpIOException`／不带令牌的取消异常时都抛出带调用方令牌的取消异常（分别在最后一次尝试、退避超过上限、还有剩余尝试三种情况下，只发一次请求、不启动退避计时器）、空闲计时器触发与调用方取消同时发生（两种先后顺序）时在最后一次尝试抛出调用方的取消异常而不是 `DownloadFailed`、调用方取消后自定义 handler 在发请求时抛 `HttpRequestException`（最后一次尝试、退避超过上限、还有剩余尝试三种情况）时抛出调用方的取消异常且只发一次请求、读响应体中途出错时重试、不合法的 User-Agent 在每次 Obtain 开始时报错（对象已在仓库时也报）、不合法的 SHA-512 与负的大小在任何请求之前报错（对象已在仓库时也报）、退避超过上限时换地址且不说成 `Retry-After`（状态码与网络错误两个分支）、64 次尝试不溢出、`Content-Length` 与期望大小不同时不读响应体就换地址。
 - 验证缺口：调用方取消时写 `.part` 的磁盘错误换成取消异常这一条没有测试，测试里没有办法让写磁盘在取消的同时失败。
 - 验证缺口：空闲超时只用测试里的假流验证过；真实的 `SocketsHttpHandler` 在读被取消时抛什么异常没有实测，代码按计时器状态判断，就是为了不依赖这一点。
 - 验证缺口：锁与并发笔记要求的“子进程持锁”契约测试还没有，现在只用同一进程的两个句柄验证；POSIX 上的行为没有实测；`DisableFileLocking` 的只读检查没有测试（Windows 上不生效，在测试进程里打开开关会影响其他测试）。

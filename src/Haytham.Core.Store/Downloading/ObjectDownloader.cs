@@ -17,13 +17,12 @@ public sealed class ObjectDownloader
     static readonly TimeSpan LongestTimer = TimeSpan.FromMilliseconds(int.MaxValue);
 
     readonly ContentStore _store;
-    readonly HttpClient _http;
     readonly DownloadOptions _options;
     readonly TimeProvider _timeProvider;
     readonly SemaphoreSlim _requests;
 
-    public ObjectDownloader(ContentStore store, HttpClient http, DownloadOptions options)
-        : this(store, http, options, TimeProvider.System)
+    public ObjectDownloader(ContentStore store, DownloadOptions options)
+        : this(store, options, TimeProvider.System)
     {
     }
 
@@ -32,16 +31,10 @@ public sealed class ObjectDownloader
     /// download lock, its holder record dates, and <see cref="DownloadOptions.ReadIdleTimeout"/>.
     /// Repair locks use the clock supplied by <see cref="ContentStore"/>.
     /// </param>
-    public ObjectDownloader(ContentStore store, HttpClient http, DownloadOptions options, TimeProvider timeProvider)
+    public ObjectDownloader(ContentStore store, DownloadOptions options, TimeProvider timeProvider)
     {
         ArgumentNullException.ThrowIfNull(timeProvider);
         // Checked here once, so a bad option fails now rather than on every obtain after it has taken a lock.
-        ArgumentException.ThrowIfNullOrWhiteSpace(options.UserAgent);
-        using (var probe = new HttpRequestMessage())
-            if (!probe.Headers.UserAgent.TryParseAdd(options.UserAgent))
-                throw new ArgumentException(
-                    $"'{options.UserAgent}' is not a valid User-Agent; a contact address goes in parentheses.",
-                    nameof(options));
         ArgumentOutOfRangeException.ThrowIfLessThan(options.MaxAttemptsPerUrl, 1);
         ArgumentOutOfRangeException.ThrowIfLessThan(options.MaxConcurrentRequests, 1);
         ArgumentOutOfRangeException.ThrowIfLessThan(options.RetryDelay, TimeSpan.Zero);
@@ -54,14 +47,27 @@ public sealed class ObjectDownloader
         }
 
         _store = store;
-        _http = http;
         _options = options;
         _timeProvider = timeProvider;
         _requests = new SemaphoreSlim(options.MaxConcurrentRequests);
     }
 
-    public async Task<ObtainResult> ObtainAsync(ObtainRequest request, CancellationToken cancellationToken = default)
+    /// <summary>Obtains an object using this call's borrowed client and User-Agent.</summary>
+    /// <remarks>The client is not disposed. All network work for this call ends before the returned task completes.</remarks>
+    public async Task<ObtainResult> ObtainAsync(
+        ObtainRequest request,
+        HttpClient http,
+        string userAgent,
+        CancellationToken cancellationToken = default)
     {
+        ArgumentNullException.ThrowIfNull(http);
+        ArgumentException.ThrowIfNullOrWhiteSpace(userAgent);
+        using (var probe = new HttpRequestMessage())
+            if (!probe.Headers.UserAgent.TryParseAdd(userAgent))
+                throw new ArgumentException(
+                    $"'{userAgent}' is not a valid User-Agent; a contact address goes in parentheses.",
+                    nameof(userAgent));
+
         _store.ThrowIfReadOnly();
         if (request.Urls.Count == 0) throw new ArgumentException("At least one URL is needed.", nameof(request));
         foreach (var url in request.Urls)
@@ -93,7 +99,7 @@ public sealed class ObjectDownloader
         var failures = new List<string>();
         foreach (var url in request.Urls)
         {
-            var imported = await TryUrlAsync(url, expected, failures, cancellationToken).ConfigureAwait(false);
+            var imported = await TryUrlAsync(url, expected, failures, http, userAgent, cancellationToken).ConfigureAwait(false);
             if (imported is not null) return new ObtainResult(imported.Sha1, imported.Size, imported.Outcome, url);
         }
 
@@ -105,6 +111,8 @@ public sealed class ObjectDownloader
         Uri url,
         ExpectedContent expected,
         List<string> failures,
+        HttpClient http,
+        string userAgent,
         CancellationToken cancellationToken)
     {
         for (var attempt = 1; ; attempt++)
@@ -116,8 +124,8 @@ public sealed class ObjectDownloader
             try
             {
                 using var message = new HttpRequestMessage(HttpMethod.Get, url);
-                message.Headers.UserAgent.ParseAdd(_options.UserAgent);
-                using var response = await _http.SendAsync(
+                message.Headers.UserAgent.ParseAdd(userAgent);
+                using var response = await http.SendAsync(
                     message,
                     HttpCompletionOption.ResponseHeadersRead,
                     cancellationToken).ConfigureAwait(false);

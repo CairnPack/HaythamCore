@@ -13,6 +13,7 @@ public sealed class ObjectDownloaderTests : IDisposable
     const string Body = "sodium-fabric-0.5.13+mc1.20.1.jar";
 
     static readonly Sha1 BodySha1 = Sha1.FromBytes(SHA1.HashData(Encoding.UTF8.GetBytes(Body)));
+    const string UserAgent = "store-tests/1.0";
 
     /// <summary>
     /// The read idle timeout is off, so every timer the downloader starts is a wait (backoff, <c>Retry-After</c>,
@@ -20,18 +21,20 @@ public sealed class ObjectDownloaderTests : IDisposable
     /// </summary>
     static readonly DownloadOptions Options = new()
     {
-        UserAgent = "store-tests/1.0",
         ReadIdleTimeout = Timeout.InfiniteTimeSpan,
     };
 
     readonly TempStoreDirectory _dir = new();
     readonly FakeHttpHandler _http = new();
     readonly TestClock _clock = new();
+    readonly HttpClient _client;
+
+    public ObjectDownloaderTests() => _client = new HttpClient(_http);
 
     static CancellationToken Token => TestContext.Current.CancellationToken;
 
     ObjectDownloader Downloader(ContentStore store, DownloadOptions? options = null) =>
-        new(store, new HttpClient(_http), options ?? Options, _clock);
+        new(store, options ?? Options, _clock);
 
     Task<FileLock> HoldDownloadLock(ContentStore store, ProgramInfo holder) =>
         FileLock.AcquireExclusiveAsync(
@@ -102,7 +105,7 @@ public sealed class ObjectDownloaderTests : IDisposable
 
     public void Dispose()
     {
-        _http.Dispose();
+        _client.Dispose();
         _dir.Dispose();
     }
 
@@ -112,7 +115,7 @@ public sealed class ObjectDownloaderTests : IDisposable
         var store = _dir.Create();
         _http.Respond(Modrinth, HttpStatusCode.OK, Body);
 
-        var result = await _clock.WithWatchdogAsync(Downloader(store).ObtainAsync(Request(Modrinth), Token));
+        var result = await _clock.WithWatchdogAsync(Downloader(store).ObtainAsync(Request(Modrinth), _client, UserAgent, Token));
 
         Assert.Equal(new ObtainResult(BodySha1, Body.Length, ImportOutcome.Added, new Uri(Modrinth)), result);
         Assert.Equal(ObjectState.Valid, await store.VerifyAsync(BodySha1, VerifyMode.Full, Token));
@@ -126,7 +129,7 @@ public sealed class ObjectDownloaderTests : IDisposable
         var store = _dir.Create();
         await store.ImportBytesAsync(Encoding.UTF8.GetBytes(Body), cancellationToken: Token);
 
-        var result = await _clock.WithWatchdogAsync(Downloader(store).ObtainAsync(Request(Modrinth), Token));
+        var result = await _clock.WithWatchdogAsync(Downloader(store).ObtainAsync(Request(Modrinth), _client, UserAgent, Token));
 
         Assert.Equal(ImportOutcome.AlreadyPresent, result.Outcome);
         Assert.Null(result.Source);
@@ -155,7 +158,7 @@ public sealed class ObjectDownloaderTests : IDisposable
 
         var obtained = await Assert.ThrowsAsync<StoreException>(
             () => _clock.WithWatchdogAsync(
-                Downloader(store).ObtainAsync(Request(Modrinth) with { Size = size, Sha512 = sha512 }, Token)));
+                Downloader(store).ObtainAsync(Request(Modrinth) with { Size = size, Sha512 = sha512 }, _client, UserAgent, Token)));
 
         Assert.Equal(StoreError.ContentMismatch, obtained.Error);
         Assert.Equal(imported.Message, obtained.Message);
@@ -173,7 +176,7 @@ public sealed class ObjectDownloaderTests : IDisposable
             Sha512 = Convert.ToHexString(SHA512.HashData(Encoding.UTF8.GetBytes(Body))),
         };
 
-        var result = await _clock.WithWatchdogAsync(Downloader(store).ObtainAsync(request, Token));
+        var result = await _clock.WithWatchdogAsync(Downloader(store).ObtainAsync(request, _client, UserAgent, Token));
 
         Assert.Equal(new ObtainResult(BodySha1, Body.Length, ImportOutcome.AlreadyPresent, null), result);
         Assert.Empty(_http.Requests);
@@ -187,7 +190,7 @@ public sealed class ObjectDownloaderTests : IDisposable
             .Respond(Modrinth, HttpStatusCode.BadGateway)
             .Respond(Modrinth, HttpStatusCode.OK, Body);
 
-        var obtain = Downloader(store).ObtainAsync(Request(Modrinth), Token);
+        var obtain = Downloader(store).ObtainAsync(Request(Modrinth), _client, UserAgent, Token);
         await _clock.AdvancePastNextTimerAsync(TimeSpan.FromSeconds(1));
         await _clock.AdvancePastNextTimerAsync(TimeSpan.FromSeconds(2));
         var result = await _clock.WithWatchdogAsync(obtain);
@@ -203,7 +206,7 @@ public sealed class ObjectDownloaderTests : IDisposable
         _http.Respond(HttpMethod.Get, Modrinth, TooManyRequests(new RetryConditionHeaderValue(TimeSpan.FromSeconds(5))))
             .Respond(Modrinth, HttpStatusCode.OK, Body);
 
-        var obtain = Downloader(store).ObtainAsync(Request(Modrinth), Token);
+        var obtain = Downloader(store).ObtainAsync(Request(Modrinth), _client, UserAgent, Token);
         await _clock.AdvancePastNextTimerAsync(TimeSpan.FromSeconds(5));
         await _clock.WithWatchdogAsync(obtain);
 
@@ -218,7 +221,7 @@ public sealed class ObjectDownloaderTests : IDisposable
         _http.Respond(HttpMethod.Get, Modrinth, TooManyRequests(new RetryConditionHeaderValue(date)))
             .Respond(Modrinth, HttpStatusCode.OK, Body);
 
-        var obtain = Downloader(store).ObtainAsync(Request(Modrinth), Token);
+        var obtain = Downloader(store).ObtainAsync(Request(Modrinth), _client, UserAgent, Token);
         await _clock.AdvancePastNextTimerAsync(TimeSpan.FromSeconds(7));
         await _clock.WithWatchdogAsync(obtain);
 
@@ -232,7 +235,7 @@ public sealed class ObjectDownloaderTests : IDisposable
         _http.Respond(HttpMethod.Get, Modrinth, TooManyRequests(new RetryConditionHeaderValue(TimeSpan.FromHours(1))))
             .Respond(CurseForge, HttpStatusCode.OK, Body);
 
-        var result = await _clock.WithWatchdogAsync(Downloader(store).ObtainAsync(Request(Modrinth, CurseForge), Token));
+        var result = await _clock.WithWatchdogAsync(Downloader(store).ObtainAsync(Request(Modrinth, CurseForge), _client, UserAgent, Token));
 
         Assert.Equal(new Uri(CurseForge), result.Source);
         Assert.Empty(_clock.Timers);
@@ -244,7 +247,7 @@ public sealed class ObjectDownloaderTests : IDisposable
         var store = _dir.Create();
         _http.Respond(Modrinth, HttpStatusCode.NotFound).Respond(CurseForge, HttpStatusCode.OK, Body);
 
-        var result = await _clock.WithWatchdogAsync(Downloader(store).ObtainAsync(Request(Modrinth, CurseForge), Token));
+        var result = await _clock.WithWatchdogAsync(Downloader(store).ObtainAsync(Request(Modrinth, CurseForge), _client, UserAgent, Token));
 
         Assert.Equal(new Uri(CurseForge), result.Source);
         Assert.Equal(1, _http.Requests.Count(r => r.Url == new Uri(Modrinth)));
@@ -257,7 +260,7 @@ public sealed class ObjectDownloaderTests : IDisposable
         var store = _dir.Create();
         _http.Respond(Modrinth, HttpStatusCode.OK, "something else").Respond(CurseForge, HttpStatusCode.OK, Body);
 
-        var result = await _clock.WithWatchdogAsync(Downloader(store).ObtainAsync(Request(Modrinth, CurseForge), Token));
+        var result = await _clock.WithWatchdogAsync(Downloader(store).ObtainAsync(Request(Modrinth, CurseForge), _client, UserAgent, Token));
 
         Assert.Equal(new Uri(CurseForge), result.Source);
         Assert.Equal(1, _http.Requests.Count(r => r.Url == new Uri(Modrinth)));
@@ -271,7 +274,7 @@ public sealed class ObjectDownloaderTests : IDisposable
         _http.Fail(Modrinth, new HttpRequestException("connection reset"))
             .Respond(CurseForge, HttpStatusCode.Forbidden);
 
-        var obtain = Downloader(store).ObtainAsync(Request(Modrinth, CurseForge), Token);
+        var obtain = Downloader(store).ObtainAsync(Request(Modrinth, CurseForge), _client, UserAgent, Token);
         await _clock.AdvancePastNextTimerAsync(TimeSpan.FromSeconds(1));
         await _clock.AdvancePastNextTimerAsync(TimeSpan.FromSeconds(2));
         var error = await Assert.ThrowsAsync<StoreException>(() => _clock.WithWatchdogAsync(obtain));
@@ -291,7 +294,7 @@ public sealed class ObjectDownloaderTests : IDisposable
         _http.Respond(HttpMethod.Get, Modrinth, Streamed(Stalled())).Respond(Modrinth, HttpStatusCode.OK, Body);
         var options = Options with { ReadIdleTimeout = TimeSpan.FromSeconds(30) };
 
-        var obtain = Downloader(store, options).ObtainAsync(Request(Modrinth), Token);
+        var obtain = Downloader(store, options).ObtainAsync(Request(Modrinth), _client, UserAgent, Token);
         await _clock.AdvancePastNextTimerAsync(TimeSpan.FromSeconds(30));
         await _clock.AdvancePastNextTimerAsync(TimeSpan.FromSeconds(1));
         var result = await _clock.WithWatchdogAsync(obtain);
@@ -308,7 +311,7 @@ public sealed class ObjectDownloaderTests : IDisposable
         _http.Respond(HttpMethod.Get, Modrinth, (request, cancellationToken) => Streamed(Stalled())(request, cancellationToken));
         var options = Options with { MaxAttemptsPerUrl = 2, ReadIdleTimeout = TimeSpan.FromSeconds(30) };
 
-        var obtain = Downloader(store, options).ObtainAsync(Request(Modrinth), Token);
+        var obtain = Downloader(store, options).ObtainAsync(Request(Modrinth), _client, UserAgent, Token);
         await _clock.AdvancePastNextTimerAsync(TimeSpan.FromSeconds(30));
         await _clock.AdvancePastNextTimerAsync(TimeSpan.FromSeconds(1));
         await _clock.AdvancePastNextTimerAsync(TimeSpan.FromSeconds(30));
@@ -327,7 +330,7 @@ public sealed class ObjectDownloaderTests : IDisposable
         var options = Options with { ReadIdleTimeout = TimeSpan.FromSeconds(30) };
         using var cancel = CancellationTokenSource.CreateLinkedTokenSource(Token);
 
-        var obtain = Downloader(store, options).ObtainAsync(Request(Modrinth), cancel.Token);
+        var obtain = Downloader(store, options).ObtainAsync(Request(Modrinth), _client, UserAgent, cancel.Token);
         // The idle timer has started, so the body is being read; it never fires because the clock stays put.
         Assert.Equal(TimeSpan.FromSeconds(30), await _clock.NextTimerAsync());
         await cancel.CancelAsync();
@@ -363,7 +366,7 @@ public sealed class ObjectDownloaderTests : IDisposable
         };
         using var cancel = CancellationTokenSource.CreateLinkedTokenSource(Token);
 
-        var obtain = Downloader(store, options).ObtainAsync(Request(Modrinth), cancel.Token);
+        var obtain = Downloader(store, options).ObtainAsync(Request(Modrinth), _client, UserAgent, cancel.Token);
         await reading.Task.WaitAsync(Token);
         await cancel.CancelAsync();
         var error = await Assert.ThrowsAnyAsync<OperationCanceledException>(() => _clock.WithWatchdogAsync(obtain));
@@ -391,7 +394,7 @@ public sealed class ObjectDownloaderTests : IDisposable
         var options = Options with { MaxAttemptsPerUrl = 1, ReadIdleTimeout = TimeSpan.FromSeconds(30) };
         using var cancel = CancellationTokenSource.CreateLinkedTokenSource(Token);
 
-        var obtain = Downloader(store, options).ObtainAsync(Request(Modrinth), cancel.Token);
+        var obtain = Downloader(store, options).ObtainAsync(Request(Modrinth), _client, UserAgent, cancel.Token);
         await reading.Task.WaitAsync(Token);
         // Every read starts its own idle timer: the first one returned the first part of the body, so its timer is
         // already disposed. The timers below are the held read's.
@@ -450,7 +453,7 @@ public sealed class ObjectDownloaderTests : IDisposable
         };
         using var cancel = CancellationTokenSource.CreateLinkedTokenSource(Token);
 
-        var obtain = Downloader(store, options).ObtainAsync(Request(Modrinth), cancel.Token);
+        var obtain = Downloader(store, options).ObtainAsync(Request(Modrinth), _client, UserAgent, cancel.Token);
         await sending.Task.WaitAsync(Token);
         await cancel.CancelAsync();
         var error = await Assert.ThrowsAnyAsync<OperationCanceledException>(() => _clock.WithWatchdogAsync(obtain));
@@ -470,7 +473,7 @@ public sealed class ObjectDownloaderTests : IDisposable
             _ => Task.FromException<int>(new HttpIOException(HttpRequestError.ResponseEnded, "connection reset mid-body")));
         _http.Respond(HttpMethod.Get, Modrinth, Streamed(broken)).Respond(Modrinth, HttpStatusCode.OK, Body);
 
-        var obtain = Downloader(store).ObtainAsync(Request(Modrinth), Token);
+        var obtain = Downloader(store).ObtainAsync(Request(Modrinth), _client, UserAgent, Token);
         await _clock.AdvancePastNextTimerAsync(TimeSpan.FromSeconds(1));
         var result = await _clock.WithWatchdogAsync(obtain);
 
@@ -479,13 +482,19 @@ public sealed class ObjectDownloaderTests : IDisposable
         Assert.Empty(_dir.TempEntries());
     }
 
-    [Fact]
-    public void A_malformed_user_agent_is_rejected_by_the_constructor()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_malformed_user_agent_is_rejected_before_any_request_even_when_the_object_is_present(bool present)
     {
         var store = _dir.Create();
+        if (present)
+            await store.ImportBytesAsync(Encoding.UTF8.GetBytes(Body), cancellationToken: Token);
 
-        Assert.Throws<ArgumentException>(
-            () => Downloader(store, new DownloadOptions { UserAgent = "name/1.0 contact@x.com" }));
+        await Assert.ThrowsAsync<ArgumentException>(
+            () => Downloader(store).ObtainAsync(Request(Modrinth), _client, "name/1.0 contact@x.com", Token));
+
+        Assert.Empty(_http.Requests);
     }
 
     public static TheoryData<string?, long?> MalformedExpectations => new()
@@ -503,7 +512,7 @@ public sealed class ObjectDownloaderTests : IDisposable
         _http.Respond(Modrinth, HttpStatusCode.NotFound).Respond(CurseForge, HttpStatusCode.NotFound);
         var request = Request(Modrinth, CurseForge) with { Sha512 = sha512, Size = size };
 
-        await Assert.ThrowsAsync<ArgumentException>(() => Downloader(store).ObtainAsync(request, Token));
+        await Assert.ThrowsAsync<ArgumentException>(() => Downloader(store).ObtainAsync(request, _client, UserAgent, Token));
 
         Assert.Empty(_http.Requests);
     }
@@ -515,7 +524,7 @@ public sealed class ObjectDownloaderTests : IDisposable
         await store.ImportBytesAsync(Encoding.UTF8.GetBytes(Body), cancellationToken: Token);
 
         await Assert.ThrowsAsync<ArgumentException>(
-            () => Downloader(store).ObtainAsync(Request(Modrinth) with { Sha512 = "not-hex" }, Token));
+            () => Downloader(store).ObtainAsync(Request(Modrinth) with { Sha512 = "not-hex" }, _client, UserAgent, Token));
     }
 
     [Fact]
@@ -525,7 +534,7 @@ public sealed class ObjectDownloaderTests : IDisposable
         _http.Respond(Modrinth, HttpStatusCode.ServiceUnavailable);
         var options = Options with { RetryDelay = TimeSpan.FromSeconds(40) };
 
-        var obtain = Downloader(store, options).ObtainAsync(Request(Modrinth), Token);
+        var obtain = Downloader(store, options).ObtainAsync(Request(Modrinth), _client, UserAgent, Token);
         await _clock.AdvancePastNextTimerAsync(TimeSpan.FromSeconds(40));
         var error = await Assert.ThrowsAsync<StoreException>(() => _clock.WithWatchdogAsync(obtain));
 
@@ -542,7 +551,7 @@ public sealed class ObjectDownloaderTests : IDisposable
         _http.Fail(Modrinth, new HttpRequestException("connection reset"));
         var options = Options with { RetryDelay = TimeSpan.FromSeconds(40) };
 
-        var obtain = Downloader(store, options).ObtainAsync(Request(Modrinth), Token);
+        var obtain = Downloader(store, options).ObtainAsync(Request(Modrinth), _client, UserAgent, Token);
         await _clock.AdvancePastNextTimerAsync(TimeSpan.FromSeconds(40));
         var error = await Assert.ThrowsAsync<StoreException>(() => _clock.WithWatchdogAsync(obtain));
 
@@ -562,7 +571,7 @@ public sealed class ObjectDownloaderTests : IDisposable
         var options = Options with { MaxAttemptsPerUrl = 64 };
 
         var error = await Assert.ThrowsAsync<StoreException>(
-            () => _clock.WithWatchdogAsync(Downloader(store, options).ObtainAsync(Request(Modrinth), Token)));
+            () => _clock.WithWatchdogAsync(Downloader(store, options).ObtainAsync(Request(Modrinth), _client, UserAgent, Token)));
 
         Assert.Contains($"{Modrinth}: HTTP 503 after 64 attempts", error.Message);
         Assert.Equal(64, _http.Requests.Count);
@@ -577,7 +586,7 @@ public sealed class ObjectDownloaderTests : IDisposable
             .Respond(CurseForge, HttpStatusCode.OK, Body);
 
         var result = await _clock.WithWatchdogAsync(
-            Downloader(store).ObtainAsync(Request(Modrinth, CurseForge) with { Size = Body.Length }, Token));
+            Downloader(store).ObtainAsync(Request(Modrinth, CurseForge) with { Size = Body.Length }, _client, UserAgent, Token));
 
         Assert.Equal(new Uri(CurseForge), result.Source);
         Assert.Equal(1, _http.Requests.Count(r => r.Url == new Uri(Modrinth)));
@@ -592,7 +601,7 @@ public sealed class ObjectDownloaderTests : IDisposable
         using var held = await HoldDownloadLock(store, new ProgramInfo("other-launcher", "2.0"));
         var options = Options with { LockTimeout = TimeSpan.FromMilliseconds(200) };
 
-        var obtain = Downloader(store, options).ObtainAsync(Request(Modrinth), Token);
+        var obtain = Downloader(store, options).ObtainAsync(Request(Modrinth), _client, UserAgent, Token);
         // Backoff doubles from 50 ms; the last wait is cut short to end at the timeout.
         await _clock.AdvancePastNextTimerAsync(TimeSpan.FromMilliseconds(50));
         await _clock.AdvancePastNextTimerAsync(TimeSpan.FromMilliseconds(100));
@@ -610,7 +619,7 @@ public sealed class ObjectDownloaderTests : IDisposable
         var store = _dir.Create();
         var held = await HoldDownloadLock(store, ProgramInfo.Unknown);
 
-        var waiting = Downloader(store).ObtainAsync(Request(Modrinth), Token);
+        var waiting = Downloader(store).ObtainAsync(Request(Modrinth), _client, UserAgent, Token);
         Assert.Equal(TimeSpan.FromMilliseconds(50), await _clock.NextTimerAsync());
         await store.ImportBytesAsync(Encoding.UTF8.GetBytes(Body), cancellationToken: Token);
         held.Dispose();
@@ -628,7 +637,7 @@ public sealed class ObjectDownloaderTests : IDisposable
         _http.Respond(Modrinth, HttpStatusCode.OK, Body);
         var held = await HoldDownloadLock(store, ProgramInfo.Unknown);
 
-        var waiting = Downloader(store).ObtainAsync(Request(Modrinth) with { Size = Body.Length + 1 }, Token);
+        var waiting = Downloader(store).ObtainAsync(Request(Modrinth) with { Size = Body.Length + 1 }, _client, UserAgent, Token);
         // The first backoff shows the waiter has already looked in the store and is queueing for the lock.
         Assert.Equal(TimeSpan.FromMilliseconds(50), await _clock.NextTimerAsync());
         await store.ImportBytesAsync(Encoding.UTF8.GetBytes(Body), cancellationToken: Token);
@@ -651,10 +660,10 @@ public sealed class ObjectDownloaderTests : IDisposable
         });
         // The real clock: how often the three waiters retry the lock while the holder writes to disk depends on the
         // machine, so there is no fixed sequence of timers for the test to step through.
-        var downloader = new ObjectDownloader(store, new HttpClient(_http), Options, TimeProvider.System);
+        var downloader = new ObjectDownloader(store, Options, TimeProvider.System);
 
         var results = await Task.WhenAll(
-            Enumerable.Range(0, 4).Select(_ => Task.Run(() => downloader.ObtainAsync(Request(Modrinth), Token))));
+            Enumerable.Range(0, 4).Select(_ => Task.Run(() => downloader.ObtainAsync(Request(Modrinth), _client, UserAgent, Token))));
 
         Assert.Single(_http.Requests);
         Assert.Single(results, r => r.Outcome == ImportOutcome.Added);
@@ -671,7 +680,7 @@ public sealed class ObjectDownloaderTests : IDisposable
         var store = ContentStore.Open(_dir.Path);
 
         var error = await Assert.ThrowsAsync<StoreException>(
-            () => _clock.WithWatchdogAsync(Downloader(store).ObtainAsync(Request(Modrinth), Token)));
+            () => _clock.WithWatchdogAsync(Downloader(store).ObtainAsync(Request(Modrinth), _client, UserAgent, Token)));
 
         Assert.Equal(StoreError.ReadOnly, error.Error);
     }

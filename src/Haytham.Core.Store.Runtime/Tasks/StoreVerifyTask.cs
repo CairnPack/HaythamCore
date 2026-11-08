@@ -12,9 +12,9 @@ public sealed partial class StoreVerifyTask : RuntimeTask<StoreVerifyInput, Obje
 
     public override TaskExitPolicy ExitPolicy => TaskExitPolicy.CancelOnExit;
 
-    protected override ValueTask<ObjectState> ExecuteAsync(TaskEvent<StoreVerifyInput, ObjectState> e)
+    protected override async ValueTask<ObjectState> ExecuteAsync(TaskEvent<StoreVerifyInput, ObjectState> e)
     {
-        module.RequireStore();
-        throw new NotImplementedException("在接入步骤 3 实现");
+        var store = module.RequireStore();
+        return await store.VerifyAsync(e.Input.Sha1, e.Input.Mode, e.Cancellation).ConfigureAwait(false);
     }
 }

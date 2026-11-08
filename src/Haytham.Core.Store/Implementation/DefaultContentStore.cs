@@ -34,6 +34,10 @@ sealed class DefaultContentStore(ContentStore store, ObjectDownloader downloader
         CancellationToken cancellationToken = default) =>
         store.ImportBytesAsync(content, expected, cancellationToken);
 
-    public Task<ObtainResult> ObtainAsync(ObtainRequest request, CancellationToken cancellationToken = default) =>
-        downloader.ObtainAsync(request, cancellationToken);
+    public Task<ObtainResult> ObtainAsync(
+        ObtainRequest request,
+        HttpClient http,
+        string userAgent,
+        CancellationToken cancellationToken = default) =>
+        downloader.ObtainAsync(request, http, userAgent, cancellationToken);
 }

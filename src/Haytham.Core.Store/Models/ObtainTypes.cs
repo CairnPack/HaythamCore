@@ -3,9 +3,6 @@ namespace Haytham.Core.Store;
 /// <summary>How <see cref="ObjectDownloader"/> talks to servers. Every default can be changed by the caller.</summary>
 public sealed record DownloadOptions
 {
-    /// <summary>Sent with every request. The library never makes one up: each program names itself.</summary>
-    public required string UserAgent { get; init; }
-
     /// <summary>Tries per candidate URL, counting the first; only I/O errors and 408, 429 and 5xx are retried.</summary>
     public int MaxAttemptsPerUrl { get; init; } = 3;
 
