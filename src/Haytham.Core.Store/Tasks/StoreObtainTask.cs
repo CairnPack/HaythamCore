@@ -1,4 +1,3 @@
-using System.Net;
 using Haytham.Runtime.Tasks;
 
 namespace Haytham.Core.Store;
@@ -20,10 +19,6 @@ public sealed partial class StoreObtainTask : RuntimeTask<ObtainRequest, ObtainR
     {
         var store = module.RequireStore();
         var network = options.ReadNetworkSettings();
-        var handler = new SocketsHttpHandler();
-        if (network.Proxy is not null)
-            handler.Proxy = new WebProxy(network.Proxy);
-        using var http = new HttpClient(handler);
-        return await store.ObtainAsync(e.Input, http, network.UserAgent, e.Cancellation).ConfigureAwait(false);
+        return await store.ObtainAsync(e.Input, network.Http, network.UserAgent, e.Cancellation).ConfigureAwait(false);
     }
 }
