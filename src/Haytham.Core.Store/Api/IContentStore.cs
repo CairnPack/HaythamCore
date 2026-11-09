@@ -6,17 +6,18 @@ namespace Haytham.Core.Store;
 /// same instance for one store so downloads also share their concurrency limit. The caller chooses the store
 /// location and supplies a borrowed HTTP client and a User-Agent on each obtain. I/O failures, content mismatches and
 /// cancellation propagate from the underlying store and downloader.
+/// The owner disposes the store after all operations have finished. Disposal does not remove stored files.
 /// </remarks>
 /// <example>
 /// <code>
-/// IContentStore store = ContentStoreFactory.Open(
+/// using IContentStore store = ContentStoreFactory.Open(
 ///     storePath, new DownloadOptions(), StoreOpenMode.CreateIfMissing);
 /// var imported = await store.ImportBytesAsync(bytes, cancellationToken: cancellationToken);
 /// using var http = new HttpClient();
 /// var obtained = await store.ObtainAsync(request, http, "my-launcher/1.0", cancellationToken);
 /// </code>
 /// </example>
-public interface IContentStore
+public interface IContentStore : IDisposable
 {
     /// <summary>The absolute path of the store directory.</summary>
     string Root { get; }

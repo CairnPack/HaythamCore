@@ -16,50 +16,71 @@ internal sealed class StoreModule(StoreModuleOptions options, StoreStatusView st
         e.Registry.RegisterTask(new StoreImportFileTask(this));
         e.Registry.RegisterTask(new StoreObtainTask(this, options));
         e.Registry.RegisterTask(new StoreOpenTask(this));
-        e.Registry.Subscribe<RuntimeEvents.OnLoading>(OnLoading);
         e.Registry.Subscribe<RuntimeEvents.OnUnloading>(OnUnloading);
         return ValueTask.CompletedTask;
     }
 
-    // An expected open failure leaves the Store Unavailable; the host still finishes loading and can retry.
-    private async ValueTask OnLoading(RuntimeEvents.OnLoading e, EventContext context) =>
-        await OpenAsync(new StoreOpenInput(null), context.Cancellation).ConfigureAwait(false);
-
-    /// <summary>Opens the Store and publishes the outcome.</summary>
-    /// <returns>A Ready snapshot, or an Unavailable one carrying the host's <see cref="StoreOpenException"/>.</returns>
-    /// <exception cref="StoreOpenException"><c>haytham.store.alreadyOpen</c>: another path while Ready; the state does not change.</exception>
-    internal async ValueTask<StoreSnapshot> OpenAsync(StoreOpenInput input, CancellationToken cancellation)
+    internal async ValueTask<StoreOpenResult> OpenAsync(StoreOpenInput input, CancellationToken cancellation)
     {
         var current = status.Current;
         if (current.Availability == StoreAvailability.Ready)
         {
-            if (string.IsNullOrEmpty(input.Path) || Path.GetRelativePath(current.Location!.Root, input.Path) == ".")
-                return current;
-
-            throw new StoreOpenException("haytham.store.alreadyOpen");
+            var failure = Path.GetRelativePath(current.Location!.Root, input.Location.Root) == "."
+                ? null : new StoreOpenFailure("haytham.store.alreadyOpen");
+            return new StoreOpenResult(current, failure);
         }
 
-        OpenedStore opened;
+        cancellation.ThrowIfCancellationRequested();
+        var opened = ContentStoreFactory.TryOpen(input.Location.Root, options.DownloadOptions, input.Mode);
+        if (opened.Failure is { } openFailure)
+            return PublishUnavailable(input.Location, openFailure);
+
+        return await PublishOpenedStoreAsync(opened.Store!, input, cancellation).ConfigureAwait(false);
+    }
+
+    internal async ValueTask<StoreOpenResult> PublishOpenedStoreAsync(
+        IContentStore opened, StoreOpenInput input, CancellationToken cancellation)
+    {
+        var decision = await DecidePublicationAsync(opened, input, cancellation).ConfigureAwait(false);
+        if (decision.Failure is { } failure)
+        {
+            opened.Dispose();
+            return PublishUnavailable(input.Location, failure);
+        }
+
+        // The host has committed its pre-publication work, so cancellation must not leave it without a ready store.
+        Volatile.Write(ref store, opened);
+        var snapshot = new StoreSnapshot(StoreAvailability.Ready, input.Location, null);
+        status.Publish(snapshot);
+        return new StoreOpenResult(snapshot, null);
+    }
+
+    private static async ValueTask<PublishDecision> DecidePublicationAsync(
+        IContentStore opened, StoreOpenInput input, CancellationToken cancellation)
+    {
         try
         {
-            opened = await options.Open(input, cancellation).ConfigureAwait(false);
+            return input.BeforePublish is { } beforePublish
+                ? await beforePublish(input.Location, cancellation).ConfigureAwait(false)
+                : PublishDecision.Allow;
         }
-        catch (StoreOpenException failure)
+        catch
         {
-            var unavailable = new StoreSnapshot(StoreAvailability.Unavailable, failure.Location, failure);
-            status.Publish(unavailable);
-            return unavailable;
+            opened.Dispose();
+            throw;
         }
+    }
 
-        Volatile.Write(ref store, opened.Store);
-        var snapshot = new StoreSnapshot(StoreAvailability.Ready, opened.Location, null);
+    private StoreOpenResult PublishUnavailable(StoreLocation location, StoreOpenFailure failure)
+    {
+        var snapshot = new StoreSnapshot(StoreAvailability.Unavailable, location, failure);
         status.Publish(snapshot);
-        return snapshot;
+        return new StoreOpenResult(snapshot, failure);
     }
 
     private ValueTask OnUnloading(RuntimeEvents.OnUnloading e, EventContext context)
     {
-        Volatile.Write(ref store, null);
+        Interlocked.Exchange(ref store, null)?.Dispose();
         return ValueTask.CompletedTask;
     }
 

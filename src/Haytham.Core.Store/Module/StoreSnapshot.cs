@@ -9,4 +9,4 @@ public enum StoreAvailability
 public sealed record StoreSnapshot(
     StoreAvailability Availability,
     StoreLocation? Location,
-    StoreOpenException? LastOpenFailure);
+    StoreOpenFailure? LastOpenFailure);

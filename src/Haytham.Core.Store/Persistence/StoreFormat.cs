@@ -11,7 +11,7 @@ static class StoreFormat
     /// <summary>The store format this program reads and writes.</summary>
     public const int Supported = 1;
 
-    public static StoreFormatFile Read(StoreLayout layout)
+    internal static (StoreFormatFile? Format, StoreDirectoryProblem? Failure) TryRead(StoreLayout layout)
     {
         StoreFormatFile? file;
         try
@@ -21,21 +21,21 @@ static class StoreFormat
         }
         catch (JsonException e)
         {
-            throw Unreadable(layout, "it is not valid JSON", e);
+            return (null, Unreadable(layout, "it is not valid JSON", e));
         }
 
-        if (file is null) throw Unreadable(layout, "it is empty");
-        if (file.Format < 1) throw Unreadable(layout, "'format' is missing or below 1");
-        if (file.MinWriterFormat < 1) throw Unreadable(layout, "'minWriterFormat' is missing or below 1");
-        if (file.StoreId == Guid.Empty) throw Unreadable(layout, "'storeId' is missing");
-        return file;
+        if (file is null) return (null, Unreadable(layout, "it is empty"));
+        if (file.Format < 1) return (null, Unreadable(layout, "'format' is missing or below 1"));
+        if (file.MinWriterFormat < 1) return (null, Unreadable(layout, "'minWriterFormat' is missing or below 1"));
+        if (file.StoreId == Guid.Empty) return (null, Unreadable(layout, "'storeId' is missing"));
+        return (file, null);
     }
 
     /// <summary>
     /// Creates <c>format.json</c> without overwriting. When another process creates the store at the same time,
     /// its file wins and is returned, so both see the same store identity.
     /// </summary>
-    public static StoreFormatFile Create(StoreLayout layout)
+    internal static (StoreFormatFile? Format, StoreDirectoryProblem? Failure) TryCreate(StoreLayout layout)
     {
         var file = new StoreFormatFile { Format = Supported, MinWriterFormat = Supported, StoreId = Guid.NewGuid() };
         var temp = layout.NewFormatTempPath();
@@ -50,11 +50,11 @@ static class StoreFormat
             try
             {
                 File.Move(temp, layout.FormatFile, overwrite: false);
-                return file;
+                return (file, null);
             }
             catch (IOException) when (File.Exists(layout.FormatFile))
             {
-                return Read(layout);
+                return TryRead(layout);
             }
         }
         finally
@@ -63,6 +63,6 @@ static class StoreFormat
         }
     }
 
-    static StoreException Unreadable(StoreLayout layout, string reason, Exception? inner = null) =>
+    static StoreDirectoryProblem Unreadable(StoreLayout layout, string reason, Exception? inner = null) =>
         new(StoreError.FormatUnreadable, $"Cannot read '{layout.FormatFile}': {reason}.", inner);
 }

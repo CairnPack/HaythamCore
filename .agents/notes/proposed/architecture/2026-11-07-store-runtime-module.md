@@ -4,6 +4,8 @@ Status: proposed
 
 本篇记录用户 2026-11-07 确认的做法。模块的加载与状态发布、四个 Task 的登记、退出策略和执行逻辑，以及每次 Obtain 借用客户端与 User-Agent 的 Store 接口均已实现。模块与 Task 的行为由宿主的进程隔离测试覆盖，HC 不另建 RuntimeHost；宿主侧验证仍属剩余范围，因此本篇保留 proposed。
 
+其中自动打开、宿主的打开委托和异常式的打开结果已被[HC 创建 Store，宿主在发布前决定是否允许使用](../../implemented/architecture/2026-11-09-store-open-before-publish.md)取代。
+
 ## Problem
 
 HaythamRuntime（CairnPack/HaythamRuntime）已以 NuGet 包 `Haytham.Runtime` 0.1.0 发布，它提供模块生命周期、Task 的接纳与排队、取消、退出策略和编译期生成的模块清单。HC 与 Gebinde 的消费者（首先是 Haytham Launcher 的原生库）要在同一个 Runtime 宿主里使用 Store，由 Runtime 负责执行和收尾，而不是各自管理 Store 的打开、操作和退出。

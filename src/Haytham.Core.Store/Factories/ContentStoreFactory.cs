@@ -7,6 +7,29 @@ namespace Haytham.Core.Store;
 /// </remarks>
 public static class ContentStoreFactory
 {
+    /// <summary>Opens a store, returning expected opening failures instead of throwing them.</summary>
+    /// <remarks>Invalid arguments and internal defects still throw. Newer writer formats remain read-only stores.</remarks>
+    public static (IContentStore? Store, StoreOpenFailure? Failure) TryOpen(
+        string root,
+        DownloadOptions options,
+        StoreOpenMode mode = StoreOpenMode.OpenExisting,
+        ProgramInfo? program = null)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        (ContentStore? Store, StoreDirectoryProblem? Failure) result;
+        try
+        {
+            result = ContentStore.TryOpen(root, mode, program);
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
+            return (null, new StoreOpenFailure("haytham.store.io", Cause: error));
+        }
+
+        if (result.Failure is { } failure) return (null, failure.ToFailure());
+        return (Create(result.Store!, options), null);
+    }
+
     /// <summary>Opens a store and exposes its import, verification and download operations through one contract.</summary>
     /// <param name="root">The store directory chosen by the caller.</param>
     /// <param name="options">Shared download settings, including retries and the concurrency limit.</param>

@@ -15,8 +15,13 @@ public class ObjectRepairTests
 
     static CancellationToken Token => TestContext.Current.CancellationToken;
 
-    static ContentStore Open(TempStoreDirectory dir, TestClock clock) =>
-        new(new StoreLayout(dir.Path), StoreFormat.Read(new StoreLayout(dir.Path)), Program, clock);
+    static ContentStore Open(TempStoreDirectory dir, TestClock clock)
+    {
+        var layout = new StoreLayout(dir.Path);
+        var result = StoreFormat.TryRead(layout);
+        Assert.Null(result.Failure);
+        return new ContentStore(layout, Assert.IsType<StoreFormatFile>(result.Format), Program, clock);
+    }
 
     static Task<FileLock> HoldRepair(ContentStore store, TestClock clock) =>
         FileLock.AcquireExclusiveAsync(

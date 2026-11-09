@@ -9,7 +9,7 @@ namespace Haytham.Core.Store;
 /// whichever URL it comes from: the download lock is keyed by SHA-1, so a second caller, in this process or
 /// another, waits and then finds the object already there. Content goes through the same checks as an import.
 /// </summary>
-public sealed class ObjectDownloader
+public sealed class ObjectDownloader : IDisposable
 {
     /// <summary>The longest single wait or timer, about 24.8 days, which stays inside what
     /// <see cref="Task.Delay(TimeSpan, TimeProvider)"/> and the
@@ -51,6 +51,8 @@ public sealed class ObjectDownloader
         _timeProvider = timeProvider;
         _requests = new SemaphoreSlim(options.MaxConcurrentRequests);
     }
+
+    public void Dispose() => _requests.Dispose();
 
     /// <summary>Obtains an object using this call's borrowed client and User-Agent.</summary>
     /// <remarks>The client is not disposed. All network work for this call ends before the returned task completes.</remarks>

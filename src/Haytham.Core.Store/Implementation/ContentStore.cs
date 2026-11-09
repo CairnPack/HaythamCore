@@ -49,27 +49,36 @@ public sealed class ContentStore
         StoreOpenMode mode = StoreOpenMode.OpenExisting,
         ProgramInfo? program = null)
     {
+        var result = TryOpen(root, mode, program);
+        if (result.Failure is { } failure) throw failure.ToException();
+        return result.Store!;
+    }
+
+    internal static (ContentStore? Store, StoreDirectoryProblem? Failure) TryOpen(
+        string root, StoreOpenMode mode, ProgramInfo? program)
+    {
         var layout = new StoreLayout(Path.GetFullPath(root));
-        StoreFormatFile format;
+        (StoreFormatFile? Format, StoreDirectoryProblem? Failure) result;
         if (File.Exists(layout.FormatFile))
         {
-            format = StoreFormat.Read(layout);
+            result = StoreFormat.TryRead(layout);
         }
         else
         {
             if (mode != StoreOpenMode.CreateIfMissing)
-                throw new StoreException(StoreError.StoreMissing, $"There is no store at '{layout.Root}'.");
-            format = CreateOrJoin(layout);
+                return (null, new StoreDirectoryProblem(StoreError.StoreMissing, $"There is no store at '{layout.Root}'."));
+            result = TryCreateOrJoin(layout);
         }
 
-        var store = new ContentStore(layout, format, program ?? ProgramInfo.Unknown, TimeProvider.System);
+        if (result.Failure is { } failure) return (null, failure);
+        var store = new ContentStore(layout, result.Format!, program ?? ProgramInfo.Unknown, TimeProvider.System);
         if (!store.IsReadOnly)
         {
             Directory.CreateDirectory(layout.ObjectsDirectory);
             Directory.CreateDirectory(layout.TempDirectory);
         }
 
-        return store;
+        return (store, null);
     }
 
     /// <summary>Path of an object; it may not exist. Use <see cref="VerifyAsync"/> to know whether it is intact.</summary>
@@ -143,18 +152,18 @@ public sealed class ContentStore
     /// Runs when <c>format.json</c> was missing a moment ago. Another program may have created the store since, so a
     /// non-empty directory is checked for <c>format.json</c> once more before it is refused.
     /// </summary>
-    internal static StoreFormatFile CreateOrJoin(StoreLayout layout)
+    internal static (StoreFormatFile? Format, StoreDirectoryProblem? Failure) TryCreateOrJoin(StoreLayout layout)
     {
         if (HasOtherEntries(layout.Root))
         {
-            if (File.Exists(layout.FormatFile)) return StoreFormat.Read(layout);
-            throw new StoreException(
+            if (File.Exists(layout.FormatFile)) return StoreFormat.TryRead(layout);
+            return (null, new StoreDirectoryProblem(
                 StoreError.NotAStore,
-                $"'{layout.Root}' is not empty and has no format.json, so it is not taken over as a store.");
+                $"'{layout.Root}' is not empty and has no format.json, so it is not taken over as a store."));
         }
 
         Directory.CreateDirectory(layout.Root);
-        return StoreFormat.Create(layout);
+        return StoreFormat.TryCreate(layout);
     }
 
     /// <summary>

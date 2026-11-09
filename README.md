@@ -21,7 +21,7 @@ dotnet build HaythamCore.slnx
 ```csharp
 using Haytham.Core.Store;
 
-IContentStore store = ContentStoreFactory.Open(
+using IContentStore store = ContentStoreFactory.Open(
     storePath,
     new DownloadOptions { MaxConcurrentRequests = 8 },
     StoreOpenMode.CreateIfMissing);
@@ -40,16 +40,20 @@ ObtainResult obtained = await store.ObtainAsync(request, http, "my-launcher/1.0"
 
 ## 作为 Haytham.Runtime 模块使用
 
-Store 同时是 [Haytham.Runtime](https://github.com/CairnPack/HaythamRuntime) 的模块，入口是项目根目录的 [StoreModule](src/Haytham.Core.Store/StoreModule.cs)。宿主加载它以后，模块打开唯一的仓库，通过 `StoreStatusView` 发布可用状态，并登记校验、文件纳入、获取和打开仓库四个 Task。`Module/` 放模块的选项与状态，`Tasks/` 放 Task 和它们的输入，`Opening/` 放打开回调、位置和打开结果；命名空间同样是 `Haytham.Core.Store`。
+Store 同时是 [Haytham.Runtime](https://github.com/CairnPack/HaythamRuntime) 的模块，入口是项目根目录的 [StoreModule](src/Haytham.Core.Store/StoreModule.cs)。模块登记校验、文件纳入、获取和打开仓库四个 Task，通过 `StoreStatusView` 发布可用状态；加载时不自动打开仓库。`Module/` 放模块的选项与状态，`Tasks/` 放 Task 和它们的输入、输出，`Opening/` 放打开回调、位置和失败；命名空间同样是 `Haytham.Core.Store`。
 
-宿主须创建 `StoreModuleOptions`、`StoreStatusView` 并放进 Runtime 的能力表。仓库位置的优先级、位置记录和预期打开失败的转换由宿主的 `StoreModuleOptions.Open` 负责，打开失败时宿主照常启动，之后可以用打开 Task 重试。所有打开请求由宿主用同一个队列键提交，由 Runtime 串行执行。
+宿主须创建 `StoreModuleOptions`（提供 `DownloadOptions` 和 `ReadNetworkSettings`）、`StoreStatusView` 并放进 Runtime 的能力表。宿主解析具体 `StoreLocation`，启动时自行提交 `StoreOpenInput(Location, Mode, BeforePublish?)`。宿主根据是否允许创建选择 `CreateIfMissing` 或 `OpenExisting`。所有打开请求由宿主用同一个队列键提交，由 Runtime 串行执行。
+
+HC 调用工厂创建实例，打开失败返回 `StoreOpenResult` 并发布带 `StoreOpenFailure` 的 Unavailable。可选的 `BeforePublish` 在实例打开后、发布前执行：返回 `PublishDecision.Allow` 才发布 Ready；返回 `PublishDecision.Reject(failure)` 则释放实例并发布 Unavailable。回调抛异常时释放实例后重新抛出。允许后不再检查取消，以保证宿主的发布前操作与 Ready 状态一致。已 Ready 时，同位置返回原快照，异位置返回原快照和 `haytham.store.alreadyOpen`，状态不变。模块拥有实例并在卸载时释放。
+
+直接使用工厂时，可以调用 `ContentStoreFactory.TryOpen` 获得实例或失败；`ContentStoreFactory.Open` 和 `ContentStore.Open` 保留抛异常的入口。实例所有者须在操作完成后释放它，释放不删除仓库文件。
 
 | Task | 行为 | 退出策略 |
 |---|---|---|
 | `StoreVerifyTask` | 使用当前 Store 校验对象 | CancelOnExit |
 | `StoreImportFileTask` | 使用当前 Store 纳入文件 | Wait |
 | `StoreObtainTask` | 使用当前 Store 和本次读取的网络设置获取对象 | Wait |
-| `StoreOpenTask` | 返回已打开仓库的快照，或在不可用时重试打开 | Wait |
+| `StoreOpenTask` | 打开指定位置，发布前等待宿主决定，返回快照和本次失败 | Wait |
 
 ## Microsoft sign-in
 

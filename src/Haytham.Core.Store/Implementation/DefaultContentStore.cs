@@ -3,6 +3,8 @@ namespace Haytham.Core.Store;
 /// <summary>Adapts the existing store and downloader to the consumer contract without changing their behavior.</summary>
 sealed class DefaultContentStore(ContentStore store, ObjectDownloader downloader) : IContentStore
 {
+    public void Dispose() => downloader.Dispose();
+
     public string Root => store.Root;
 
     public Guid StoreId => store.StoreId;
