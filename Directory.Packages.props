@@ -6,7 +6,7 @@
 
   <ItemGroup>
     <!-- Haytham Launcher, Haytham Core and Gebinde must use the same Runtime version: they are published together. -->
-    <PackageVersion Include="Haytham.Runtime" Version="0.2.0-local" />
+    <PackageVersion Include="Haytham.Runtime" Version="0.2.0" />
   </ItemGroup>
 
   <ItemGroup Label="Tests">
